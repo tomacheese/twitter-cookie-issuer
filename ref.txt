@@ -1,0 +1,15 @@
+Twitterの自動認証と操作
+https://github.com/book000/twitter-rss で @the-convocation/twitter-scraper を使って Twitter を操作している。
+認証としては、ct0 と auth_token クッキーを用いて認証するが、割とすぐこのクッキーが使えなくなる。
+いままでは ct0 と auth_token を手元で取得し、GitHub の Secret に登録していたが、今後は Twitter からクッキーを自動取得し、自動で Secret を更新したい。
+
+上記の ct0 と auth_token の値を取得し、(とりあえずローカルファイルに) 保存するツールは、独立して構築し、Docker上で動くものとして開発したい。
+そこから、保存されたクッキーの Secret 反映は、別に bash スクリプトとかを使ってやるので、スコープ外。
+
+Twitter の面倒なボット判定を潜り抜けながら認証させる必要があり、結構頑張る必要があると思う。
+Puppeteer とか、Playwright を使ってブラウザに似せかけて、クッキーを横取りしてあげる必要がある？
+Puppeteer とか Playwright は重いので、そうでない方法で取得できるならそうしたい。
+
+以下のような代物もある？参考になるかも？
+https://github.com/0x4337/agent-twitter-client-grokky
+

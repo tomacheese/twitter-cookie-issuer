@@ -1,0 +1,11 @@
+.venv/
+trash/
+__pycache__/
+*.pyc
+.git/
+.env
+config.json
+cookies.json
+data/
+docs/
+.claude/

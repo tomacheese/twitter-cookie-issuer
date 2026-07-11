@@ -207,6 +207,27 @@ def login(
             username_field.press_sequentially(username, delay=80)
             username_field.press("Enter")
 
+            # ユーザー名送信直後、Castle.io 等の不正検知により
+            # "We've temporarily limited your login. Please try again later."
+            # のようなレート制限バナーが同一画面上に表示されることがある。
+            # このとき begin_login API 自体は HTTP 200 で応答するため
+            # (実通信キャプチャで確認済み、詳細は KNOWLEDGE.md 参照)、
+            # 検知しないまま後続のパスワード欄クリックに進むと、バナー
+            # 表示によるレイアウト変化でクリックがインターセプトされ続け、
+            # 原因不明の「クリックタイムアウト」(60秒弱) としてしか
+            # 報告できていなかった。ここで早期 (3秒) に検知することで、
+            # 実際の原因をエラーメッセージとして明示する。
+            early_error_message = _extract_generic_error(page)
+            if early_error_message:
+                screenshot_path = _save_failure_screenshot(
+                    page, screenshot_dir, "generic_error", screenshot_username
+                )
+                browser.close()
+                raise LoginError(
+                    f"ログインエラー: {early_error_message} (url: {page.url})",
+                    screenshot_path,
+                )
+
             # 追加の本人確認 (ユーザー名/電話番号) が挟まれることがある
             try:
                 alt_identifier_field = page.locator(

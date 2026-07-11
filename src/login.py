@@ -128,7 +128,7 @@ def _launch_context(playwright, proxy: dict | None):
     return browser, context
 
 
-def _extract_generic_error(page) -> str | None:
+def _extract_generic_error(page, timeout: int = 3000) -> str | None:
     """画面上に汎用エラーバナーが表示されていれば、そのメッセージ本文を返す。
 
     "The password you entered is incorrect." 等、新オンボーディング
@@ -137,7 +137,7 @@ def _extract_generic_error(page) -> str | None:
     """
     error_icon = page.locator('[data-icon="icon-error-triangle"]:visible').first
     try:
-        error_icon.wait_for(state="visible", timeout=3000)
+        error_icon.wait_for(state="visible", timeout=timeout)
     except PlaywrightTimeoutError:
         return None
     return error_icon.locator("xpath=ancestor::div[1]").inner_text().strip()
@@ -211,17 +211,21 @@ def login(
             # "We've temporarily limited your login. Please try again later."
             # のようなレート制限バナーが同一画面上に表示されることがある。
             # このとき begin_login API 自体は HTTP 200 で応答するため
-            # (実通信キャプチャで確認済み、詳細は KNOWLEDGE.md 参照)、
-            # 検知しないまま後続のパスワード欄クリックに進むと、バナー
-            # 表示によるレイアウト変化でクリックがインターセプトされ続け、
-            # 原因不明の「クリックタイムアウト」(60秒弱) としてしか
-            # 報告できていなかった。ここで早期 (3秒) に検知することで、
-            # 実際の原因をエラーメッセージとして明示する。
-            early_error_message = _extract_generic_error(page)
+            # (実通信キャプチャで確認済み、詳細は KNOWLEDGE.md 参照)、検知
+            # しないまま後続のパスワード欄クリックに進むと、バナー表示に
+            # よるレイアウト変化でクリックがインターセプトされ続け、原因
+            # 不明のクリックタイムアウトとしてしか報告できていなかった。
+            # 成功時 (バナー非表示時) の待ち時間を抑えるため、短い timeout
+            # で早期に検知し、実際の原因をエラーメッセージとして明示する。
+            early_error_message = _extract_generic_error(page, timeout=1000)
             if early_error_message:
-                screenshot_path = _save_failure_screenshot(
-                    page, screenshot_dir, "generic_error", screenshot_username
-                )
+                screenshot_path = None
+                try:
+                    screenshot_path = _save_failure_screenshot(
+                        page, screenshot_dir, "generic_error", screenshot_username
+                    )
+                except Exception:
+                    pass
                 browser.close()
                 raise LoginError(
                     f"ログインエラー: {early_error_message} (url: {page.url})",

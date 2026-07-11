@@ -2,7 +2,7 @@ FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 WORKDIR /app
 
-# 標準出力をアンバッファ化する。指定しないと非tty環境 (docker logs) では
+# 標準出力をアンバッファ化する。指定しないと非 tty 環境 (docker logs) では
 # stdout がブロックバッファされ、daemon モードのように serve_forever() で
 # 常駐するプロセスでは起動ログがいつまでも出力されない。
 ENV PYTHONUNBUFFERED=1
@@ -22,13 +22,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
 COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
 
 # /data 配下 (once モードのスクリーンショット保存先等) を作成する。
-# ホスト側ボリュームマウント時のUID/GID不一致によるパーミッションエラーを
-# 避けるため、rootユーザーのまま実行する (/data の所有権調整が不要になる)。
-RUN mkdir -p /data/screenshots /data/cookies
-
-RUN patchright install chromium
+# ホスト側ボリュームマウント時のUID/GID 不一致によるパーミッションエラーを
+# 避けるため、root ユーザーのまま実行する (/data の所有権調整が不要になる)。
+RUN chmod +x entrypoint.sh && \
+    mkdir -p /data/screenshots /data/cookies && \
+    patchright install chromium
 
 ENTRYPOINT ["/usr/bin/tini", "--", "./entrypoint.sh"]

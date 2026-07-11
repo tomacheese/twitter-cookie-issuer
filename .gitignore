@@ -1,0 +1,22 @@
+node_modules/
+.env
+cookies.json
+cookies_*.json
+config.json
+.venv/
+__pycache__/
+*.pyc
+ui_metrics_research/
+network_research/
+multi_login_research/
+.claude/
+
+# docker run -v $(pwd)/data:/data で使うローカル検証用ディレクトリ
+data/
+
+# 調査過程で作成した不採用実装・検証スクリプト群 (ローカルには残すが公開リポジトリには含めない)
+trash/
+
+# ボット判定回避手法の詳細な調査ログ (ローカルの研究メモとして残すが、
+# 手法の詳細を公開リポジトリに含めないよう非公開とする)
+KNOWLEDGE.md

@@ -12,8 +12,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from config import COOKIES_PATH, SCREENSHOTS_DIR, ConfigError, load_once_config
-from login import LoginError, get_cookies
+from .config import COOKIES_PATH, SCREENSHOTS_DIR, ConfigError, load_once_config
+from .login import LoginError, get_cookies
 
 # daemon モードでの cookie 保存先 (ユーザー名ごとに別ファイル)。
 COOKIES_DIR = Path("/data/cookies")
@@ -133,6 +133,7 @@ def run_daemon() -> None:
 def main() -> None:
     """MODE 環境変数に応じて once/daemon を切り替えるエントリーポイント。"""
     mode = os.environ.get("MODE", "once")
+    print(f"起動しました (MODE: {mode})")
     if mode == "once":
         run_once()
     elif mode == "daemon":

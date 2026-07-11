@@ -2,6 +2,11 @@ FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 WORKDIR /app
 
+# 標準出力をアンバッファ化する。指定しないと非tty環境 (docker logs) では
+# stdout がブロックバッファされ、daemon モードのように serve_forever() で
+# 常駐するプロセスでは起動ログがいつまでも出力されない。
+ENV PYTHONUNBUFFERED=1
+
 # ベースイメージに xvfb が含まれていない場合に備えてインストールする。
 # tini は PID 1 として xvfb-run (シグナル/ゾンビ処理を正しく行わない) を
 # ラップし、`docker run --init` なしでもハングしないようにするために導入する。

@@ -103,6 +103,8 @@ curl -X POST http://localhost:8080/login \
 5. 意図的に誤ったパスワードを渡し、失敗時のスクリーンショットが
    `/data/screenshots/` に保存され、適切なステータスコード/メッセージが
    返ることを確認する。
+6. コンテナ起動直後に `起動しました (MODE: once)` または
+   `起動しました (MODE: daemon)` のログが出力されることを確認する。
 
 ## 既知の制約
 
@@ -122,23 +124,17 @@ curl -X POST http://localhost:8080/login \
   アカウントごとに異なる `HTTP_PROXY`/`HTTPS_PROXY` を指定すること。
 - daemon モードのエンドポイントには認証機構がないため、ネットワーク分離
   必須 (上記参照)。
-- `-v "$(pwd)/data:/data"` でホストディレクトリをマウントする場合、コンテナ内は
-  非root ユーザー `pwuser` (uid はビルド時の `useradd` により決まる。既定では
-  `1001` になることが多い) で実行される。ホスト側のディレクトリ所有者の uid が
-  これと異なると、失敗時スクリーンショットの保存等で `PermissionError` が
-  発生することがある。事前に `mkdir -p data && chmod 777 data` するか、
-  `docker run --rm twitter-cookie-issuer id -u pwuser` で実際の uid を確認して
-  `chown` を合わせること。
 
 ## ディレクトリ構成
 
 ```
 src/
-  main.py       # CLIエントリーポイント (once/daemon モード分岐)
+  __init__.py   # パッケージマーカー (中身なし)
+  __main__.py   # CLIエントリーポイント (once/daemon モード分岐、`python -m src` で起動)
   config.py     # onceモード用の環境変数読み込み
   login.py      # patchright によるログイン・cookie再利用判定
 Dockerfile
-entrypoint.sh   # xvfb-run 経由で src/main.py を起動するラッパー
+entrypoint.sh   # xvfb-run 経由で python -m src を起動するラッパー
 .dockerignore
 requirements.txt
 ```

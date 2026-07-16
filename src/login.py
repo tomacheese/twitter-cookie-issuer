@@ -143,11 +143,18 @@ def _extract_generic_error(page, timeout: int = 3000) -> str | None:
     return error_icon.locator("xpath=ancestor::div[1]").inner_text().strip()
 
 
-def is_cached_cookie_valid(cookies: dict, proxy: dict | None) -> bool:
-    """キャッシュされた cookie が x.com/home にそのままアクセスできるか確認する。
+def verify_and_refresh_cookie(cookies: dict, proxy: dict | None) -> dict | None:
+    """キャッシュされた cookie の有効性を確認し、有効なら最新値を返す。
 
-    ブラウザに ct0/auth_token を注入して /home にアクセスし、ログイン
-    画面へリダイレクトされなければ有効と判定する。
+    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、ログイン
+    画面へリダイレクトされなければ有効と判定する。有効だった場合、X 側で
+    ct0 がローテーションされている可能性があるため、アクセス後に
+    context.cookies() から現在の ct0/auth_token を取得し直して返す
+    (ローテーションされていなければ渡された値と同一になる)。
+
+    Returns:
+        有効だった場合: 現在の ct0/auth_token を含む dict。
+        無効だった場合: None。
     """
     with sync_playwright() as p:
         browser, context = _launch_context(p, proxy)
@@ -173,8 +180,19 @@ def is_cached_cookie_valid(cookies: dict, proxy: dict | None) -> bool:
             valid = page.url.startswith("https://x.com/home")
         except PlaywrightTimeoutError:
             valid = False
+
+        if not valid:
+            browser.close()
+            return None
+
+        current_cookies = context.cookies("https://x.com")
+        current_dict = {c["name"]: c["value"] for c in current_cookies}
         browser.close()
-        return valid
+
+        return {
+            "ct0": current_dict.get("ct0", cookies["ct0"]),
+            "auth_token": current_dict.get("auth_token", cookies["auth_token"]),
+        }
 
 
 def login(
@@ -364,6 +382,18 @@ def login(
     return {"ct0": ct0, "auth_token": auth_token}
 
 
+def _write_cache(cache_path: Path, cookies: dict) -> None:
+    """ct0/auth_token をキャッシュファイルに書き込む。
+
+    フルログイン成功時と、キャッシュされた cookie の値が更新された時の
+    両方から呼ばれる、ファイル書き込みの単一の経路。
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(cookies, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 def get_cookies(
     username: str,
     password: str,
@@ -376,11 +406,17 @@ def get_cookies(
     """キャッシュされた cookie が有効ならそれを返し、無効ならフルログインする。
 
     キャッシュが有効だった場合、認証情報を使った再ログインは行わない。
+    ただし X 側で ct0 がローテーションされていた場合は、キャッシュファイル
+    を最新値に同期する。
     """
     proxy = _build_proxy_config()
     cached = load_cached_cookies(cache_path)
-    if cached and is_cached_cookie_valid(cached, proxy):
-        return cached
+    if cached:
+        latest = verify_and_refresh_cookie(cached, proxy)
+        if latest is not None:
+            if latest != cached:
+                _write_cache(cache_path, latest)
+            return latest
 
     result = login(
         username,
@@ -391,6 +427,5 @@ def get_cookies(
         screenshot_dir,
         screenshot_username,
     )
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_cache(cache_path, result)
     return result

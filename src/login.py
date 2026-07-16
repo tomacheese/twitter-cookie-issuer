@@ -146,10 +146,10 @@ def _extract_generic_error(page, timeout: int = 3000) -> str | None:
 def verify_and_refresh_cookie(cookies: dict, proxy: dict | None) -> dict | None:
     """キャッシュされた cookie の有効性を確認し、有効なら最新値を返す。
 
-    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、ログイン
-    画面へリダイレクトされなければ有効と判定する。有効だった場合、X 側で
-    ct0 がローテーションされている可能性があるため、アクセス後に
-    context.cookies() から現在の ct0/auth_token を取得し直して返す
+    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、
+    ログイン画面へリダイレクトされなければ有効と判定する。有効だった
+    場合、X 側で ct0 がローテーションされている可能性があるため、
+    アクセス後に現在の ct0/auth_token を取得し直して返す
     (ローテーションされていなければ渡された値と同一になる)。
 
     Returns:
@@ -385,8 +385,7 @@ def login(
 def _write_cache(cache_path: Path, cookies: dict) -> None:
     """ct0/auth_token をキャッシュファイルに書き込む。
 
-    フルログイン成功時と、キャッシュされた cookie の値が更新された時の
-    両方から呼ばれる、ファイル書き込みの単一の経路。
+    ファイル書き込みを一箇所に集約するための単一の経路。
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(

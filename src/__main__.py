@@ -20,8 +20,7 @@ from .login import LoginError, get_cookies
 COOKIES_DIR = Path("/data/cookies")
 
 # X のユーザー名の許可文字集合 (英数字・アンダースコア、1〜15文字)。
-# username はキャッシュファイル名の構築にそのまま使われるため、ここで
-# 検証しないとパストラバーサル (例: "../../etc/passwd") を許してしまう。
+# username はキャッシュファイル名の構築にそのまま使われるため、ここで検証しないとパストラバーサル (例: "../../etc/passwd") を許してしまう。
 _USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 # 同時に1件のログインしか実行しないための排他ロック。
@@ -128,8 +127,7 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
-        # BaseHTTPRequestHandler のデフォルトはアクセスログを stderr に
-        # 出すため、そのまま stderr に出力する (握りつぶさない)。
+        # BaseHTTPRequestHandler のデフォルトはアクセスログを stderr に出すため、そのまま stderr に出力する (握りつぶさない)。
         sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
 

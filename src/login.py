@@ -1,12 +1,8 @@
 """patchright を用いた x.com へのログインと ct0/auth_token 取得処理。
 
 選定理由:
-- 独自実装 (curl_cffi + x_client_transaction + ui_metrics 手動解読) は
-  LoginEnterUserIdentifierSSO ステップで一貫して code 399 "Could not log
-  you in now" を返すことを確認済み (詳細は KNOWLEDGE.md 参照)。
-- 通常の Playwright は Chrome DevTools Protocol (CDP) 経由の自動操作が
-  検知されブロックされるため、CDP 検知回避パッチが当たった Playwright
-  互換フォークである patchright を採用する。
+- 独自実装 (curl_cffi + x_client_transaction + ui_metrics 手動解読) は LoginEnterUserIdentifierSSO ステップで一貫して code 399 "Could not log you in now" を返すことを確認済み (詳細は KNOWLEDGE.md 参照)。
+- 通常の Playwright は Chrome DevTools Protocol (CDP) 経由の自動操作が検知されブロックされるため、CDP 検知回避パッチが当たった Playwright 互換フォークである patchright を採用する。
 """
 import json
 import os
@@ -22,8 +18,7 @@ class LoginError(RuntimeError):
     """ログインフロー中に発生したエラーを表す例外。
 
     Attributes:
-        screenshot_path: 失敗時に保存したスクリーンショットのパス
-            (保存できなかった場合は None)。
+        screenshot_path: 失敗時に保存したスクリーンショットのパス (保存できなかった場合は None)。
     """
 
     def __init__(self, message: str, screenshot_path: Path | None = None):
@@ -34,14 +29,9 @@ class LoginError(RuntimeError):
 def _build_proxy_config() -> dict | None:
     """環境変数からブラウザ起動用のプロキシ設定を組み立てる。
 
-    HTTPS_PROXY を優先し、なければ HTTP_PROXY を使う。どちらも
-    未設定ならプロキシなし (None) を返す。
+    HTTPS_PROXY を優先し、なければ HTTP_PROXY を使う。どちらも未設定ならプロキシなし (None) を返す。
 
-    `http://user:pass@host:port` 形式で認証情報が URL に埋め込まれて
-    いる場合、Playwright の `proxy.server` はこれをサポートしない
-    (Chromium 側に認証情報が渡らず、プロキシ接続がタイムアウトすることを
-    実機で確認済み) ため、`username`/`password` の別フィールドに
-    分離して渡す。
+    `http://user:pass@host:port` 形式で認証情報が URL に埋め込まれている場合、Playwright の `proxy.server` はこれをサポートしない (Chromium 側に認証情報が渡らず、プロキシ接続がタイムアウトすることを実機で確認済み) ため、`username`/`password` の別フィールドに分離して渡す。
     """
     proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
     if not proxy_url:
@@ -61,9 +51,7 @@ def _build_proxy_config() -> dict | None:
 def load_cached_cookies(cache_path: Path) -> dict | None:
     """キャッシュファイルから ct0/auth_token を読み込む。
 
-    ファイルが存在しない、JSON として壊れている、必要なキーが
-    欠けている場合はいずれも None を返し、呼び出し側でフルログインに
-    フォールバックできるようにする。
+    ファイルが存在しない、JSON として壊れている、必要なキーが欠けている場合はいずれも None を返し、呼び出し側でフルログインにフォールバックできるようにする。
     """
     if not cache_path.exists():
         return None
@@ -81,8 +69,7 @@ def _save_failure_screenshot(
 ) -> Path:
     """失敗時のスクリーンショットを保存し、そのパスを返す。
 
-    ファイル名は once モードでは "{datetime}-{type}.png"、daemon モード
-    (username 指定あり) では "{datetime}-{username}-{type}.png" となる。
+    ファイル名は once モードでは "{datetime}-{type}.png"、daemon モード (username 指定あり) では "{datetime}-{username}-{type}.png" となる。
     """
     screenshot_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -98,22 +85,10 @@ def _save_failure_screenshot(
 def _launch_context(playwright, proxy: dict | None):
     """patchright でブラウザ・コンテキストを起動する共通処理。
 
-    patchright 自体に CDP 検知回避のパッチが含まれているため
-    playwright-stealth を重ねる必要はないことを確認済み。Xvfb 上での
-    非ヘッドレス起動が必須 (headless だと検知されブロックされる)。
+    patchright 自体に CDP 検知回避のパッチが含まれているため playwright-stealth を重ねる必要はないことを確認済み。Xvfb 上での非ヘッドレス起動が必須 (headless だと検知されブロックされる)。
 
-    Docker コンテナには既定では `/dev/dri` (GPU デバイス) が存在せず、
-    `--use-gl`/`--enable-unsafe-swiftshader` を指定しないと WebGL の
-    コンテキスト生成自体が失敗する (`getContext('webgl')` が null を返す)
-    ことを確認済みのため、常に SwiftShader (ソフトウェアレンダラー) で
-    起動する。GPU passthrough (`/dev/dri` を実 GPU 経由で渡す構成) も
-    検証したが、レンダラー文字列の違い (SwiftShader か実 GPU か) は
-    ログイン成功・失敗と無相関であることが実機検証で判明したため
-    (詳細は KNOWLEDGE.md §6.6/§6.8 参照)、ホスト依存の起動オプションを
-    要求する GPU passthrough は採用しない。
-    `--disable-dev-shm-usage` は Docker のデフォルト `/dev/shm` サイズ
-    (64MB) が小さく、レンダラープロセスがクラッシュしうる既知の問題への
-    対策 (Playwright/Puppeteer の Docker 運用で広く推奨されているフラグ)。
+    Docker コンテナには既定では `/dev/dri` (GPU デバイス) が存在せず、`--use-gl`/`--enable-unsafe-swiftshader` を指定しないと WebGL のコンテキスト生成自体が失敗する (`getContext('webgl')` が null を返す) ことを確認済みのため、常に SwiftShader (ソフトウェアレンダラー) で起動する。GPU passthrough (`/dev/dri` を実 GPU 経由で渡す構成) も検証したが、レンダラー文字列の違い (SwiftShader か実 GPU か) はログイン成功・失敗と無相関であることが実機検証で判明したため (詳細は KNOWLEDGE.md §6.6/§6.8 参照)、ホスト依存の起動オプションを要求する GPU passthrough は採用しない。
+    `--disable-dev-shm-usage` は Docker のデフォルト `/dev/shm` サイズ (64MB) が小さく、レンダラープロセスがクラッシュしうる既知の問題への対策 (Playwright/Puppeteer の Docker 運用で広く推奨されているフラグ)。
     """
     gl_args = [
         "--use-gl=swiftshader",
@@ -131,9 +106,7 @@ def _launch_context(playwright, proxy: dict | None):
 def _extract_generic_error(page, timeout: int = 3000) -> str | None:
     """画面上に汎用エラーバナーが表示されていれば、そのメッセージ本文を返す。
 
-    "The password you entered is incorrect." 等、新オンボーディング
-    フローの汎用エラーはいずれも icon-error-triangle アイコンと、その
-    共通の親要素内にメッセージ本文の <p> が入る構造で表示される。
+    "The password you entered is incorrect." 等、新オンボーディングフローの汎用エラーはいずれも icon-error-triangle アイコンと、その共通の親要素内にメッセージ本文の <p> が入る構造で表示される。
     """
     error_icon = page.locator('[data-icon="icon-error-triangle"]:visible').first
     try:
@@ -143,11 +116,14 @@ def _extract_generic_error(page, timeout: int = 3000) -> str | None:
     return error_icon.locator("xpath=ancestor::div[1]").inner_text().strip()
 
 
-def is_cached_cookie_valid(cookies: dict, proxy: dict | None) -> bool:
-    """キャッシュされた cookie が x.com/home にそのままアクセスできるか確認する。
+def verify_and_refresh_cookie(cookies: dict, proxy: dict | None) -> dict | None:
+    """キャッシュされた cookie の有効性を確認し、有効なら最新値を返す。
 
-    ブラウザに ct0/auth_token を注入して /home にアクセスし、ログイン
-    画面へリダイレクトされなければ有効と判定する。
+    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、ログイン画面へリダイレクトされなければ有効と判定する。有効だった場合、X 側で ct0 がローテーションされている可能性があるため、アクセス後に現在の ct0/auth_token を取得し直して返す (ローテーションされていなければ渡された値と同一になる)。
+
+    Returns:
+        有効だった場合: 現在の ct0/auth_token を含む dict。
+        無効だった場合: None。
     """
     with sync_playwright() as p:
         browser, context = _launch_context(p, proxy)
@@ -173,8 +149,19 @@ def is_cached_cookie_valid(cookies: dict, proxy: dict | None) -> bool:
             valid = page.url.startswith("https://x.com/home")
         except PlaywrightTimeoutError:
             valid = False
+
+        if not valid:
+            browser.close()
+            return None
+
+        current_cookies = context.cookies("https://x.com")
+        current_dict = {c["name"]: c["value"] for c in current_cookies}
         browser.close()
-        return valid
+
+        return {
+            "ct0": current_dict.get("ct0", cookies["ct0"]),
+            "auth_token": current_dict.get("auth_token", cookies["auth_token"]),
+        }
 
 
 def login(
@@ -198,25 +185,16 @@ def login(
         try:
             page.goto("https://x.com/i/flow/login", wait_until="load", timeout=60000)
 
-            # .fill() だと React 側の入力ハンドラが反応せず、送信後にフォームが
-            # 最初の画面まで丸ごとリセットされることを確認したため、実際の
-            # キー入力をシミュレートする press_sequentially を使う。
+            # .fill() だと React 側の入力ハンドラが反応せず、送信後にフォームが最初の画面まで丸ごとリセットされることを確認したため、実際のキー入力をシミュレートする press_sequentially を使う。
             username_field = page.locator("#jf-input-username_or_email").first
             username_field.wait_for(state="visible", timeout=30000)
             username_field.click()
             username_field.press_sequentially(username, delay=80)
             username_field.press("Enter")
 
-            # ユーザー名送信直後、Castle.io 等の不正検知により
-            # "We've temporarily limited your login. Please try again later."
-            # のようなレート制限バナーが同一画面上に表示されることがある。
-            # このとき begin_login API 自体は HTTP 200 で応答するため
-            # (実通信キャプチャで確認済み、詳細は KNOWLEDGE.md 参照)、検知
-            # しないまま後続のパスワード欄クリックに進むと、バナー表示に
-            # よるレイアウト変化でクリックがインターセプトされ続け、原因
-            # 不明のクリックタイムアウトとしてしか報告できていなかった。
-            # 成功時 (バナー非表示時) の待ち時間を抑えるため、短い timeout
-            # で早期に検知し、実際の原因をエラーメッセージとして明示する。
+            # ユーザー名送信直後、Castle.io 等の不正検知により "We've temporarily limited your login. Please try again later." のようなレート制限バナーが同一画面上に表示されることがある。
+            # このとき begin_login API 自体は HTTP 200 で応答するため (実通信キャプチャで確認済み、詳細は KNOWLEDGE.md 参照)、検知しないまま後続のパスワード欄クリックに進むと、バナー表示によるレイアウト変化でクリックがインターセプトされ続け、原因不明のクリックタイムアウトとしてしか報告できていなかった。
+            # 成功時 (バナー非表示時) の待ち時間を抑えるため、短い timeout で早期に検知し、実際の原因をエラーメッセージとして明示する。
             early_error_message = _extract_generic_error(page, timeout=1000)
             if early_error_message:
                 screenshot_path = None
@@ -254,10 +232,7 @@ def login(
             except PlaywrightTimeoutError:
                 pass
 
-            # 直前の画面 (ユーザー名入力欄) がフェードアウト等の遷移演出中に
-            # 残っていると、次画面のパスワード欄と重なりクリックが
-            # インターセプトされてタイムアウトすることを確認したため、
-            # ユーザー名欄が画面から消えるのを (ベストエフォートで) 待つ。
+            # 直前の画面 (ユーザー名入力欄) がフェードアウト等の遷移演出中に残っていると、次画面のパスワード欄と重なりクリックがインターセプトされてタイムアウトすることを確認したため、ユーザー名欄が画面から消えるのを (ベストエフォートで) 待つ。
             try:
                 username_field.wait_for(state="hidden", timeout=5000)
             except PlaywrightTimeoutError:
@@ -343,11 +318,8 @@ def login(
         except LoginError:
             raise
         except Exception as exc:
-            # 想定済みの分岐 (LoginError) 以外の例外は、要素の重なりによる
-            # クリック失敗のタイムアウト等、想定していなかった画面状態で
-            # 発生しうる。生の例外のまま落として診断情報 (スクリーンショット)
-            # を失わないよう、ここで捕捉してスクリーンショットを残したうえで
-            # LoginError に変換する。
+            # 想定済みの分岐 (LoginError) 以外の例外は、要素の重なりによるクリック失敗のタイムアウト等、想定していなかった画面状態で発生しうる。
+            # 生の例外のまま落として診断情報 (スクリーンショット) を失わないよう、ここで捕捉してスクリーンショットを残したうえで LoginError に変換する。
             screenshot_path = None
             try:
                 screenshot_path = _save_failure_screenshot(
@@ -364,6 +336,17 @@ def login(
     return {"ct0": ct0, "auth_token": auth_token}
 
 
+def _write_cache(cache_path: Path, cookies: dict) -> None:
+    """ct0/auth_token をキャッシュファイルに書き込む。
+
+    ファイル書き込みを一箇所に集約するための単一の経路。
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps(cookies, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
 def get_cookies(
     username: str,
     password: str,
@@ -375,12 +358,16 @@ def get_cookies(
 ) -> dict[str, str]:
     """キャッシュされた cookie が有効ならそれを返し、無効ならフルログインする。
 
-    キャッシュが有効だった場合、認証情報を使った再ログインは行わない。
+    キャッシュが有効だった場合、認証情報を使った再ログインは行わない。ただし X 側で ct0 がローテーションされていた場合は、キャッシュファイルを最新値に同期する。
     """
     proxy = _build_proxy_config()
     cached = load_cached_cookies(cache_path)
-    if cached and is_cached_cookie_valid(cached, proxy):
-        return cached
+    if cached:
+        latest = verify_and_refresh_cookie(cached, proxy)
+        if latest is not None:
+            if latest != cached:
+                _write_cache(cache_path, latest)
+            return latest
 
     result = login(
         username,
@@ -391,6 +378,5 @@ def get_cookies(
         screenshot_dir,
         screenshot_username,
     )
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_cache(cache_path, result)
     return result

@@ -7,6 +7,7 @@ MODE 環境変数で実行モードを切り替える。
 """
 import json
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +18,10 @@ from .login import LoginError, get_cookies
 
 # daemon モードでの cookie 保存先 (ユーザー名ごとに別ファイル)。
 COOKIES_DIR = Path("/data/cookies")
+
+# X のユーザー名の許可文字集合 (英数字・アンダースコア、1〜15文字)。
+# username はキャッシュファイル名の構築にそのまま使われるため、ここで検証しないとパストラバーサル (例: "../../etc/passwd") を許してしまう。
+_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 # 同時に1件のログインしか実行しないための排他ロック。
 _login_lock = threading.Lock()
@@ -81,6 +86,12 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if not _USERNAME_PATTERN.match(username):
+            self._send_json(
+                400, {"status": "error", "message": "username の形式が不正です"}
+            )
+            return
+
         if not _login_lock.acquire(blocking=False):
             self._send_json(
                 409, {"status": "conflict", "message": "別のログイン処理を実行中です"}
@@ -116,8 +127,7 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
-        # BaseHTTPRequestHandler のデフォルトはアクセスログを stderr に
-        # 出すため、そのまま stderr に出力する (握りつぶさない)。
+        # BaseHTTPRequestHandler のデフォルトはアクセスログを stderr に出すため、そのまま stderr に出力する (握りつぶさない)。
         sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
 

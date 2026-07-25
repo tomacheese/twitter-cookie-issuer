@@ -1,5 +1,11 @@
 FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
+# CI (reusable-docker.yml) がビルド時に計算済み semver を APPLICATION_VERSION として
+# 自動的に渡す。ローカル docker build 等で未指定の場合は空文字列のままとなり、
+# error_reporting.py 側で release 未設定として扱われる。
+ARG APPLICATION_VERSION=""
+ENV APPLICATION_VERSION=$APPLICATION_VERSION
+
 WORKDIR /app
 
 # 標準出力をアンバッファ化する。指定しないと非 tty 環境 (docker logs) では

@@ -48,6 +48,8 @@ docker run --rm \
 | `TWITTER_OTP_SECRET` | 2FA 有効時のみ必須 | TOTP の Base32 シークレット |
 | `HTTP_PROXY` / `HTTPS_PROXY` | 省略可 | 複数アカウントを別 IP から実行したい場合のみ |
 | `TZ` | **強く推奨** | ブラウザに報告させるタイムゾーン。実行ホストの実際の所在地 (= 送信元 IP のジオロケーション) に合わせること (詳細は下記「既知の制約」参照) |
+| `SENTRY_DSN` | 省略可 | 設定するとエラー・ログイン失敗を GlitchTip (Sentry 互換) に送信する |
+| `SENTRY_ENVIRONMENT` | 省略可 | Sentry イベントの environment 値 (未設定時は `production`) |
 
 既に有効な `/data/cookies.json` があれば、ブラウザによる再ログインは行わずそのまま
 再利用する。
@@ -73,6 +75,8 @@ curl -X POST http://localhost:8080/login \
   -H "Content-Type: application/json" \
   -d '{"username": "...", "password": "...", "otp_secret": "..."}'
 ```
+
+once モードと同じ `SENTRY_DSN`/`SENTRY_ENVIRONMENT` が daemon モードにも適用される。
 
 成功時は `{"status": "ok", "ct0": "...", "auth_token": "..."}` を返しつつ
 `/data/cookies/{username}.json` にも保存する。
@@ -105,6 +109,11 @@ curl -X POST http://localhost:8080/login \
    返ることを確認する。
 6. コンテナ起動直後に `起動しました (MODE: once)` または
    `起動しました (MODE: daemon)` のログが出力されることを確認する。
+7. `SENTRY_DSN` を GlitchTip project id 24 の DSN に設定した状態で意図的に誤った
+   パスワードを渡し `docker run` する。GlitchTip 側 (project id 24) に
+   `LoginError` のイベントが届くこと、およびイベント詳細のスタックトレースに
+   `password`/`otp_secret` の生の値が含まれず `[Filtered]` と表示されることを
+   確認する。
 
 ## 既知の制約
 

@@ -13,7 +13,10 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import sentry_sdk
+
 from .config import COOKIES_PATH, SCREENSHOTS_DIR, ConfigError, load_once_config
+from .error_reporting import init_sentry
 from .login import LoginError, get_cookies
 
 # daemon モードでの cookie 保存先 (ユーザー名ごとに別ファイル)。
@@ -46,9 +49,14 @@ def run_once() -> None:
             screenshot_dir=SCREENSHOTS_DIR,
         )
     except LoginError as error:
+        sentry_sdk.capture_exception(error)
         print(f"ログインに失敗しました: {error}", file=sys.stderr)
         if error.screenshot_path:
             print(f"スクリーンショット: {error.screenshot_path}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as error:
+        sentry_sdk.capture_exception(error)
+        print(f"予期しないエラーが発生しました: {error}", file=sys.stderr)
         sys.exit(1)
 
     print(f"ct0 と auth_token を {COOKIES_PATH} に保存しました。")
@@ -111,10 +119,16 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
             )
             self._send_json(200, {"status": "ok", **result})
         except LoginError as error:
+            sentry_sdk.capture_exception(error)
             payload = {"status": "error", "message": str(error)}
             if error.screenshot_path:
                 payload["screenshot"] = str(error.screenshot_path)
             self._send_json(500, payload)
+        except Exception as error:
+            sentry_sdk.capture_exception(error)
+            self._send_json(
+                500, {"status": "error", "message": "internal server error"}
+            )
         finally:
             _login_lock.release()
 
@@ -142,6 +156,7 @@ def run_daemon() -> None:
 
 def main() -> None:
     """MODE 環境変数に応じて once/daemon を切り替えるエントリーポイント。"""
+    init_sentry()
     mode = os.environ.get("MODE", "once")
     print(f"起動しました (MODE: {mode})")
     if mode == "once":

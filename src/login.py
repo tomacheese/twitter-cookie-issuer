@@ -407,14 +407,54 @@ def login(
     return {"ct0": ct0, "auth_token": auth_token}
 
 
-def _write_cache(cache_path: Path, cookies: dict) -> None:
-    """ct0/auth_token をキャッシュファイルに書き込む。
+def _now_iso() -> str:
+    """現在時刻を UTC の ISO 8601 文字列として返す。"""
+    return datetime.now(timezone.utc).isoformat()
 
-    ファイル書き込みを一箇所に集約するための単一の経路。
+
+def _read_cache_raw(cache_path: Path) -> dict | None:
+    """cache ファイルを生の dict として読み込む。
+
+    ファイルが存在しない場合は空 dict (新規作成してよい)、JSON として壊れている/
+    dict でない場合は None (内容不明であり巻き込んで上書きすべきでない) を返す。
     """
+    if not cache_path.exists():
+        return {}
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_cache(
+    cache_path: Path, *, cookies: dict | None = None, metadata: dict | None = None
+) -> None:
+    """既存キーを維持したまま cookies/metadata を部分更新してキャッシュに書き込む。
+
+    cache ファイルが JSON として破損している場合、metadata のみの更新
+    (cookies が None) では上書きしない。壊れた内容を metadata だけの
+    ファイルで握りつぶし、後から解析するすべを失わないようにするため。
+    cookies も渡された場合 (full login 成功等) は、そもそも新しい正しい
+    値で全体を書き直す操作なので、壊れていた既存ファイルを空から
+    作り直してよい。
+    """
+    existing = _read_cache_raw(cache_path)
+    if existing is None:
+        if cookies is None:
+            return
+        existing = {}
+    if cookies:
+        existing.update(cookies)
+    if metadata:
+        existing_metadata = existing.get("metadata")
+        if not isinstance(existing_metadata, dict):
+            existing_metadata = {}
+        existing_metadata.update(metadata)
+        existing["metadata"] = existing_metadata
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(
-        json.dumps(cookies, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
 
@@ -429,25 +469,61 @@ def get_cookies(
 ) -> dict[str, str]:
     """キャッシュされた cookie が有効ならそれを返し、無効ならフルログインする。
 
-    キャッシュが有効だった場合、認証情報を使った再ログインは行わない。ただし X 側で ct0 がローテーションされていた場合は、キャッシュファイルを最新値に同期する。
+    キャッシュの検証結果が VALID の場合、認証情報を使った再ログインは行わない。
+    INDETERMINATE の場合は ct0/auth_token を変更せず、IndeterminateVerificationError
+    を送出する (呼び出し側で再試行可能なエラーとして扱う想定)。
+    INVALID の場合のみフルログインへフォールバックする。
+
+    検証・ログインの実施結果は cache ファイルの "metadata" キーに記録する
+    (既存の ct0/auth_token キーはそのまま維持し、キー追加のみで拡張する)。
+
+    Raises:
+        IndeterminateVerificationError: cookie の有効性を確定できなかった場合。
+        LoginError: フルログインに失敗した場合。
     """
     proxy = _build_proxy_config()
     cached = load_cached_cookies(cache_path)
     if cached:
-        latest = verify_and_refresh_cookie(cached, proxy)
-        if latest is not None:
-            if latest != cached:
-                _write_cache(cache_path, latest)
+        result, latest = verify_and_refresh_cookie(cached, proxy)
+        _write_cache(
+            cache_path,
+            cookies=latest if result is VerificationResult.VALID else None,
+            metadata={
+                "lastValidationAt": _now_iso(),
+                "lastValidationResult": result.value,
+            },
+        )
+        if result is VerificationResult.VALID:
             return latest
+        if result is VerificationResult.INDETERMINATE:
+            raise IndeterminateVerificationError(
+                "cookie の有効性を確定できませんでした"
+                " (timeout / network error 等)。ct0 / auth_token は変更していません。"
+            )
+        # result is VerificationResult.INVALID -> フルログインへフォールバック
 
-    result = login(
-        username,
-        password,
-        email,
-        otp_secret,
-        proxy,
-        screenshot_dir,
-        screenshot_username,
+    try:
+        result_cookies = login(
+            username,
+            password,
+            email,
+            otp_secret,
+            proxy,
+            screenshot_dir,
+            screenshot_username,
+        )
+    except LoginError as error:
+        if cache_path.exists():
+            _write_cache(
+                cache_path,
+                metadata={
+                    "lastFullLoginFailedAt": _now_iso(),
+                    "lastFullLoginFailureType": error.failure_type or "unknown",
+                },
+            )
+        raise
+
+    _write_cache(
+        cache_path, cookies=result_cookies, metadata={"lastFullLoginAt": _now_iso()}
     )
-    _write_cache(cache_path, result)
-    return result
+    return result_cookies

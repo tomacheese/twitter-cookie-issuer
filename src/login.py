@@ -7,6 +7,7 @@
 import json
 import os
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -19,11 +20,35 @@ class LoginError(RuntimeError):
 
     Attributes:
         screenshot_path: 失敗時に保存したスクリーンショットのパス (保存できなかった場合は None)。
+        failure_type: 失敗の種別 ("generic_error" 等、_save_failure_screenshot に渡すものと同じ文字列)。
+            未分類の場合は None。
     """
 
-    def __init__(self, message: str, screenshot_path: Path | None = None):
+    def __init__(
+        self,
+        message: str,
+        screenshot_path: Path | None = None,
+        failure_type: str | None = None,
+    ):
         super().__init__(message)
         self.screenshot_path = screenshot_path
+        self.failure_type = failure_type
+
+
+class IndeterminateVerificationError(RuntimeError):
+    """cookie の有効性を確定できなかったことを表す例外。
+
+    フルログインへのフォールバックは行わず、呼び出し側 (once/daemon) で
+    再試行可能なエラーとして扱われることを想定する。
+    """
+
+
+class VerificationResult(Enum):
+    """保存済み cookie の検証結果を表す3状態。"""
+
+    VALID = "valid"
+    INVALID = "invalid"
+    INDETERMINATE = "indeterminate"
 
 
 def _build_proxy_config() -> dict | None:
@@ -116,52 +141,87 @@ def _extract_generic_error(page, timeout: int = 3000) -> str | None:
     return error_icon.locator("xpath=ancestor::div[1]").inner_text().strip()
 
 
-def verify_and_refresh_cookie(cookies: dict, proxy: dict | None) -> dict | None:
-    """キャッシュされた cookie の有効性を確認し、有効なら最新値を返す。
+def _is_login_route(url: str) -> bool:
+    """URL が明示的なログイン画面のものかどうかを判定する。"""
+    return url.startswith("https://x.com/i/flow/login") or url.startswith(
+        "https://x.com/login"
+    )
 
-    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、ログイン画面へリダイレクトされなければ有効と判定する。有効だった場合、X 側で ct0 がローテーションされている可能性があるため、アクセス後に現在の ct0/auth_token を取得し直して返す (ローテーションされていなければ渡された値と同一になる)。
+
+def _has_login_form(page) -> bool:
+    """login() が実際に使うユーザー名入力欄が画面上に存在するかどうかを判定する。
+
+    フォーム検出自体が (ページが既に閉じている等で) 失敗しても、
+    それは「未認証を確認できなかった」というだけなので広く例外を捕捉する。
+    """
+    try:
+        page.locator("#jf-input-username_or_email").first.wait_for(
+            state="visible", timeout=2000
+        )
+        return True
+    except Exception:
+        return False
+
+
+def verify_and_refresh_cookie(
+    cookies: dict, proxy: dict | None
+) -> tuple[VerificationResult, dict | None]:
+    """キャッシュされた cookie の有効性を確認する。
+
+    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、以下の3状態に分類する。
+
+    - VALID: /home に到達できた。X 側で ct0 がローテーションされている可能性があるため、
+      アクセス後に現在の ct0/auth_token を取得し直して返す
+      (ローテーションされていなければ渡された値と同一になる)。
+    - INVALID: 明示的なログイン画面 (URL またはログインフォームの存在) を確認できた。
+      cookie が認証に使えないことが確定した場合のみこの値を返す。
+    - INDETERMINATE: ナビゲーション自体が例外で失敗した場合、または /home にも
+      明示的なログイン画面にも該当しない想定外の状態だった場合。timeout や
+      network error だけでは cookie 失効とみなさないための分類。
 
     Returns:
-        有効だった場合: 現在の ct0/auth_token を含む dict。
-        無効だった場合: None。
+        (VerificationResult, dict | None) のタプル。VALID の場合のみ2要素目に
+        現在の ct0/auth_token を含む dict が入り、それ以外は None。
     """
     with sync_playwright() as p:
         browser, context = _launch_context(p, proxy)
-        context.add_cookies(
-            [
-                {
-                    "name": "ct0",
-                    "value": cookies["ct0"],
-                    "domain": ".x.com",
-                    "path": "/",
-                },
-                {
-                    "name": "auth_token",
-                    "value": cookies["auth_token"],
-                    "domain": ".x.com",
-                    "path": "/",
-                },
-            ]
-        )
-        page = context.new_page()
         try:
-            page.goto("https://x.com/home", wait_until="load", timeout=30000)
-            valid = page.url.startswith("https://x.com/home")
-        except PlaywrightTimeoutError:
-            valid = False
+            context.add_cookies(
+                [
+                    {
+                        "name": "ct0",
+                        "value": cookies["ct0"],
+                        "domain": ".x.com",
+                        "path": "/",
+                    },
+                    {
+                        "name": "auth_token",
+                        "value": cookies["auth_token"],
+                        "domain": ".x.com",
+                        "path": "/",
+                    },
+                ]
+            )
+            page = context.new_page()
+            try:
+                page.goto("https://x.com/home", wait_until="load", timeout=30000)
+            except Exception:
+                return VerificationResult.INDETERMINATE, None
 
-        if not valid:
+            if page.url.startswith("https://x.com/home"):
+                current_cookies = context.cookies("https://x.com")
+                current_dict = {c["name"]: c["value"] for c in current_cookies}
+                return VerificationResult.VALID, {
+                    "ct0": current_dict.get("ct0", cookies["ct0"]),
+                    "auth_token": current_dict.get("auth_token", cookies["auth_token"]),
+                }
+
+            if _is_login_route(page.url) or _has_login_form(page):
+                return VerificationResult.INVALID, None
+
+            return VerificationResult.INDETERMINATE, None
+        finally:
             browser.close()
-            return None
-
-        current_cookies = context.cookies("https://x.com")
-        current_dict = {c["name"]: c["value"] for c in current_cookies}
-        browser.close()
-
-        return {
-            "ct0": current_dict.get("ct0", cookies["ct0"]),
-            "auth_token": current_dict.get("auth_token", cookies["auth_token"]),
-        }
 
 
 def login(
@@ -208,6 +268,7 @@ def login(
                 raise LoginError(
                     f"ログインエラー: {early_error_message} (url: {page.url})",
                     screenshot_path,
+                    failure_type="generic_error",
                 )
 
             # 追加の本人確認 (ユーザー名/電話番号) が挟まれることがある
@@ -228,6 +289,7 @@ def login(
                     raise LoginError(
                         "追加の本人確認 (email/phone) が要求されましたが email が未設定です。",
                         screenshot_path,
+                        failure_type="email_verification_required",
                     )
             except PlaywrightTimeoutError:
                 pass
@@ -254,7 +316,9 @@ def login(
                     )
                     browser.close()
                     raise LoginError(
-                        f"ログインエラー: {error_message} (url: {page.url})", screenshot_path
+                        f"ログインエラー: {error_message} (url: {page.url})",
+                        screenshot_path,
+                        failure_type="generic_error",
                     )
 
                 verification_field = page.locator("input.jf-code-input-field").first
@@ -268,6 +332,7 @@ def login(
                     raise LoginError(
                         f"ホーム画面にも確認コード入力画面にも到達しませんでした (url: {page.url})",
                         screenshot_path,
+                        failure_type="unexpected_state",
                     )
                 if not otp_secret:
                     screenshot_path = _save_failure_screenshot(
@@ -277,6 +342,7 @@ def login(
                     raise LoginError(
                         "2 要素認証コードの入力が要求されましたが otp_secret が未設定です。",
                         screenshot_path,
+                        failure_type="otp_secret_missing",
                     )
                 code = pyotp.TOTP(otp_secret).now()
                 verification_field.click()
@@ -296,7 +362,7 @@ def login(
                         page, screenshot_dir, failure_type, screenshot_username
                     )
                     browser.close()
-                    raise LoginError(message, screenshot_path)
+                    raise LoginError(message, screenshot_path, failure_type=failure_type)
 
             cookies = context.cookies("https://x.com")
             cookie_dict = {c["name"]: c["value"] for c in cookies}
@@ -312,6 +378,7 @@ def login(
                     f"ct0 / auth_token が取得できませんでした。"
                     f"取得済み cookie: {list(cookie_dict.keys())}",
                     screenshot_path,
+                    failure_type="cookie_extraction_failed",
                 )
 
             browser.close()
@@ -331,7 +398,11 @@ def login(
                 browser.close()
             except Exception:
                 pass
-            raise LoginError(f"予期しないエラーが発生しました: {exc}", screenshot_path) from exc
+            raise LoginError(
+                f"予期しないエラーが発生しました: {exc}",
+                screenshot_path,
+                failure_type="unexpected_exception",
+            ) from exc
 
     return {"ct0": ct0, "auth_token": auth_token}
 

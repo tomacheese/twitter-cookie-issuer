@@ -17,7 +17,7 @@ import sentry_sdk
 
 from .config import COOKIES_PATH, SCREENSHOTS_DIR, ConfigError, load_once_config
 from .error_reporting import init_sentry
-from .login import LoginError, get_cookies
+from .login import IndeterminateVerificationError, LoginError, get_cookies
 
 # daemon モードでの cookie 保存先 (ユーザー名ごとに別ファイル)。
 COOKIES_DIR = Path("/data/cookies")
@@ -48,6 +48,9 @@ def run_once() -> None:
             cache_path=COOKIES_PATH,
             screenshot_dir=SCREENSHOTS_DIR,
         )
+    except IndeterminateVerificationError as error:
+        print(f"cookie の検証結果が判定不能でした: {error}", file=sys.stderr)
+        sys.exit(2)
     except LoginError as error:
         sentry_sdk.capture_exception(error)
         print(f"ログインに失敗しました: {error}", file=sys.stderr)
@@ -118,6 +121,8 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                 screenshot_username=username,
             )
             self._send_json(200, {"status": "ok", **result})
+        except IndeterminateVerificationError as error:
+            self._send_json(503, {"status": "indeterminate", "message": str(error)})
         except LoginError as error:
             sentry_sdk.capture_exception(error)
             payload = {"status": "error", "message": str(error)}

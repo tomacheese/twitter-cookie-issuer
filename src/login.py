@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import pyotp
+import sentry_sdk
 from patchright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 
@@ -44,7 +45,7 @@ class IndeterminateVerificationError(RuntimeError):
 
 
 class VerificationResult(Enum):
-    """保存済み cookie の検証結果を表す3状態。"""
+    """保存済み cookie の検証結果を表す 3 状態。"""
 
     VALID = "valid"
     INVALID = "invalid"
@@ -168,44 +169,43 @@ def verify_and_refresh_cookie(
 ) -> tuple[VerificationResult, dict | None]:
     """キャッシュされた cookie の有効性を確認する。
 
-    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、以下の3状態に分類する。
-
-    - VALID: /home に到達できた。X 側で ct0 がローテーションされている可能性があるため、
-      アクセス後に現在の ct0/auth_token を取得し直して返す
-      (ローテーションされていなければ渡された値と同一になる)。
-    - INVALID: 明示的なログイン画面 (URL またはログインフォームの存在) を確認できた。
-      cookie が認証に使えないことが確定した場合のみこの値を返す。
-    - INDETERMINATE: ナビゲーション自体が例外で失敗した場合、または /home にも
-      明示的なログイン画面にも該当しない想定外の状態だった場合。timeout や
-      network error だけでは cookie 失効とみなさないための分類。
+    ct0/auth_token をブラウザに注入して x.com/home にアクセスし、VALID/
+    INVALID/INDETERMINATE のいずれかに分類する。timeout や network error
+    だけでは cookie 失効とみなさないための分類。
 
     Returns:
-        (VerificationResult, dict | None) のタプル。VALID の場合のみ2要素目に
-        現在の ct0/auth_token を含む dict が入り、それ以外は None。
+        (VerificationResult, dict | None) のタプル。VALID の場合のみ
+        2 要素目に現在の ct0/auth_token を含む dict が入り、それ以外は None。
     """
     with sync_playwright() as p:
         browser, context = _launch_context(p, proxy)
         try:
-            context.add_cookies(
-                [
-                    {
-                        "name": "ct0",
-                        "value": cookies["ct0"],
-                        "domain": ".x.com",
-                        "path": "/",
-                    },
-                    {
-                        "name": "auth_token",
-                        "value": cookies["auth_token"],
-                        "domain": ".x.com",
-                        "path": "/",
-                    },
-                ]
-            )
-            page = context.new_page()
             try:
+                context.add_cookies(
+                    [
+                        {
+                            "name": "ct0",
+                            "value": cookies["ct0"],
+                            "domain": ".x.com",
+                            "path": "/",
+                        },
+                        {
+                            "name": "auth_token",
+                            "value": cookies["auth_token"],
+                            "domain": ".x.com",
+                            "path": "/",
+                        },
+                    ]
+                )
+                page = context.new_page()
                 page.goto("https://x.com/home", wait_until="load", timeout=30000)
-            except Exception:
+            except Exception as exc:
+                # 例外の詳細 (frame local 経由) を送ると cookie 値の生の値が
+                # 漏洩しうるため、種別のみを通知する。
+                sentry_sdk.capture_message(
+                    f"cookie 検証中に {type(exc).__name__} が発生したため判定不能としました",
+                    level="warning",
+                )
                 return VerificationResult.INDETERMINATE, None
 
             if page.url.startswith("https://x.com/home"):
@@ -219,6 +219,10 @@ def verify_and_refresh_cookie(
             if _is_login_route(page.url) or _has_login_form(page):
                 return VerificationResult.INVALID, None
 
+            sentry_sdk.capture_message(
+                "cookie 検証で想定外のページ状態のため判定不能としました",
+                level="warning",
+            )
             return VerificationResult.INDETERMINATE, None
         finally:
             browser.close()
@@ -435,9 +439,8 @@ def _write_cache(
     cache ファイルが JSON として破損している場合、metadata のみの更新
     (cookies が None) では上書きしない。壊れた内容を metadata だけの
     ファイルで握りつぶし、後から解析するすべを失わないようにするため。
-    cookies も渡された場合 (full login 成功等) は、そもそも新しい正しい
-    値で全体を書き直す操作なので、壊れていた既存ファイルを空から
-    作り直してよい。
+    cookies も渡された場合 (full login 成功等) は cookie 値ごと書き直すため、
+    壊れていた既存ファイルを空から作り直してよい。
     """
     existing = _read_cache_raw(cache_path)
     if existing is None:
@@ -453,9 +456,11 @@ def _write_cache(
         existing_metadata.update(metadata)
         existing["metadata"] = existing_metadata
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
+    tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+    tmp_path.write_text(
         json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    os.replace(tmp_path, cache_path)
 
 
 def get_cookies(
@@ -469,16 +474,11 @@ def get_cookies(
 ) -> dict[str, str]:
     """キャッシュされた cookie が有効ならそれを返し、無効ならフルログインする。
 
-    キャッシュの検証結果が VALID の場合、認証情報を使った再ログインは行わない。
-    INDETERMINATE の場合は ct0/auth_token を変更せず、IndeterminateVerificationError
-    を送出する (呼び出し側で再試行可能なエラーとして扱う想定)。
-    INVALID の場合のみフルログインへフォールバックする。
-
-    検証・ログインの実施結果は cache ファイルの "metadata" キーに記録する
-    (既存の ct0/auth_token キーはそのまま維持し、キー追加のみで拡張する)。
+    検証・ログインの実施結果は cache ファイルの "metadata" キーに記録する。
 
     Raises:
         IndeterminateVerificationError: cookie の有効性を確定できなかった場合。
+            ct0/auth_token は変更しない。
         LoginError: フルログインに失敗した場合。
     """
     proxy = _build_proxy_config()
@@ -500,7 +500,6 @@ def get_cookies(
                 "cookie の有効性を確定できませんでした"
                 " (timeout / network error 等)。ct0 / auth_token は変更していません。"
             )
-        # result is VerificationResult.INVALID -> フルログインへフォールバック
 
     try:
         result_cookies = login(

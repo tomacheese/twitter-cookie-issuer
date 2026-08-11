@@ -54,6 +54,10 @@ docker run --rm \
 既に有効な `/data/cookies.json` があれば、ブラウザによる再ログインは行わずそのまま
 再利用する。
 
+ログイン処理自体が失敗した場合は exit code `1` で終了する。cookie の有効性を
+判定不能だった場合 (timeout / network error 等) は、既存の `ct0`/`auth_token`
+を変更せず exit code `2` で終了する。
+
 複数アカウントを同一 IP・同一環境から短時間に連続してログインさせると不正検知を
 誘発することを確認済み (詳細は下記「既知の制約」参照)。
 
@@ -88,6 +92,7 @@ once モードと同じ `SENTRY_DSN`/`SENTRY_ENVIRONMENT` が daemon モード�
 | `400` | `username`/`password` 等の必須項目が欠如している |
 | `409` | 他のログイン処理を実行中 (排他制御により1度に1件のみ処理) |
 | `500` | ログイン処理自体が失敗 (message とスクリーンショットのパスを含む) |
+| `503` | cookie の有効性を判定不能 (timeout / network error 等)。既存の `ct0`/`auth_token` は変更していない。呼び出し側は現状 fail-fast する設計のため、次回サイクル等での再試行を想定する |
 
 また `GET /healthz` はプロセスの生存確認用エンドポイントで、常に `200`
 `{"status": "ok"}` を返す。
@@ -114,6 +119,11 @@ once モードと同じ `SENTRY_DSN`/`SENTRY_ENVIRONMENT` が daemon モード�
    `LoginError` のイベントが届くこと、およびイベント詳細のスタックトレースに
    `password`/`otp_secret` の生の値が含まれず `[Filtered]` と表示されることを
    確認する。
+8. 有効な `/data/cookies.json` がある状態で、意図的にネットワークを遮断
+   (例: `HTTPS_PROXY` に到達不能なアドレスを指定) した状態で `docker run`
+   する。フルログインへフォールバックせず、once モードなら exit code `2`、
+   daemon モードなら `POST /login` が `503` を返すこと、および
+   `/data/cookies.json` の `ct0`/`auth_token` が変更されていないことを確認する。
 
 ## 既知の制約
 

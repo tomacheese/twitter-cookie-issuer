@@ -90,7 +90,7 @@ once モードと同じ `SENTRY_DSN`/`SENTRY_ENVIRONMENT` が daemon モード�
 | ステータスコード | 状況 |
 |---|---|
 | `400` | `username`/`password` 等の必須項目が欠如している |
-| `409` | 他のログイン処理を実行中 (排他制御により1度に1件のみ処理) |
+| `409` | 他のログイン処理の完了を `LOGIN_LOCK_TIMEOUT_SECONDS` 秒待ったが取得できなかった (排他制御により1度に1件のみ処理。待機自体は bounded で、即時 reject はしない) |
 | `500` | ログイン処理自体が失敗 (message とスクリーンショットのパスを含む) |
 | `503` | cookie の有効性を判定不能 (timeout / network error 等)。既存の `ct0`/`auth_token` は変更していない。呼び出し側は現状 fail-fast する設計のため、次回サイクル等での再試行を想定する |
 
@@ -99,6 +99,10 @@ once モードと同じ `SENTRY_DSN`/`SENTRY_ENVIRONMENT` が daemon モード�
 
 待受ポートは環境変数 `PORT` (デフォルト `8080`) で変更可能。変更する場合は
 `docker run -e PORT=... -p <PORT>:<PORT> ...` のように `-e`/`-p` を揃えて指定する。
+
+`/login` の排他ロック待機の上限秒数は環境変数 `LOGIN_LOCK_TIMEOUT_SECONDS`
+(デフォルト `180`) で変更可能。数値として解釈できない値や 0 以下、
+`inf`/`nan` を指定した場合はデフォルト値にフォールバックする。
 
 ## 手動検証手順
 

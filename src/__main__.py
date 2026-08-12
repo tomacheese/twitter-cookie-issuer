@@ -6,10 +6,14 @@ MODE 環境変数で実行モードを切り替える。
 - "daemon": HTTPサーバーとして常駐し、リクエストごとにログインする。
 """
 import json
+import math
 import os
 import re
 import sys
 import threading
+import time
+import uuid
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,6 +32,46 @@ _USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 # 同時に1件のログインしか実行しないための排他ロック。
 _login_lock = threading.Lock()
+
+
+def _load_login_lock_timeout_seconds_from(raw: str) -> float:
+    """`LOGIN_LOCK_TIMEOUT_SECONDS` の文字列値をパースする。
+
+    数値として解釈できない、0 以下、または有限でない (inf/nan) 場合は
+    デフォルト値 (180 秒) にフォールバックする。`float("inf")` は
+    パースに成功するため、有限判定を別途行わないと実質無制限待機を
+    許してしまう。
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        return 180.0
+    return value if math.isfinite(value) and value > 0 else 180.0
+
+
+def _load_login_lock_timeout_seconds() -> float:
+    return _load_login_lock_timeout_seconds_from(
+        os.environ.get("LOGIN_LOCK_TIMEOUT_SECONDS", "180")
+    )
+
+
+LOGIN_LOCK_TIMEOUT_SECONDS = _load_login_lock_timeout_seconds()
+
+
+@contextmanager
+def _acquire_login_lock(timeout: float):
+    """`_login_lock` を bounded (timeout 付き) に取得する。
+
+    Yields:
+        bool: 取得できたかどうか。取得できた場合のみ、with を抜ける際に
+        解放する (取得できなかった場合は release() 対象がないため呼ばない)。
+    """
+    acquired = _login_lock.acquire(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _login_lock.release()
 
 
 def run_once() -> None:

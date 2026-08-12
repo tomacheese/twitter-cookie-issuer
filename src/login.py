@@ -6,6 +6,7 @@
 """
 import json
 import os
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -471,10 +472,16 @@ def get_cookies(
     cache_path: Path,
     screenshot_dir: Path,
     screenshot_username: str | None = None,
+    timing: dict[str, float] | None = None,
 ) -> dict[str, str]:
     """キャッシュされた cookie が有効ならそれを返し、無効ならフルログインする。
 
     検証・ログインの実施結果は cache ファイルの "metadata" キーに記録する。
+
+    Args:
+        timing: 渡された場合、実行した phase の所要時間 (ミリ秒) を
+            "verify_ms"/"login_ms" キーへ書き込む。呼び出し側の診断ログ用の
+            出力パラメータであり、デフォルト None なら計測しない。
 
     Raises:
         IndeterminateVerificationError: cookie の有効性を確定できなかった場合。
@@ -484,7 +491,10 @@ def get_cookies(
     proxy = _build_proxy_config()
     cached = load_cached_cookies(cache_path)
     if cached:
+        verify_start = time.monotonic()
         result, latest = verify_and_refresh_cookie(cached, proxy)
+        if timing is not None:
+            timing["verify_ms"] = (time.monotonic() - verify_start) * 1000
         _write_cache(
             cache_path,
             cookies=latest if result is VerificationResult.VALID else None,
@@ -501,6 +511,7 @@ def get_cookies(
                 " (timeout / network error 等)。ct0 / auth_token は変更していません。"
             )
 
+    login_start = time.monotonic()
     try:
         result_cookies = login(
             username,
@@ -512,6 +523,8 @@ def get_cookies(
             screenshot_username,
         )
     except LoginError as error:
+        if timing is not None:
+            timing["login_ms"] = (time.monotonic() - login_start) * 1000
         if cache_path.exists():
             _write_cache(
                 cache_path,
@@ -521,6 +534,8 @@ def get_cookies(
                 },
             )
         raise
+    if timing is not None:
+        timing["login_ms"] = (time.monotonic() - login_start) * 1000
 
     _write_cache(
         cache_path, cookies=result_cookies, metadata={"lastFullLoginAt": _now_iso()}

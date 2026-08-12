@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,19 +38,19 @@ _login_lock = threading.Lock()
 def _load_login_lock_timeout_seconds_from(raw: str) -> float:
     """`LOGIN_LOCK_TIMEOUT_SECONDS` の文字列値をパースする。
 
-    数値として解釈できない、0 以下、または有限でない (inf/nan) 場合は
-    デフォルト値 (180 秒) にフォールバックする。`float("inf")` は
-    パースに成功するため、有限判定を別途行わないと実質無制限待機を
-    許してしまう。
+    `float("inf")` はパースに成功するため、有限判定を別途行わないと
+    実質無制限待機を許してしまう。
     """
     try:
         value = float(raw)
     except ValueError:
         return 180.0
-    return value if math.isfinite(value) and value > 0 else 180.0
+    is_valid = math.isfinite(value) and 0 < value <= threading.TIMEOUT_MAX
+    return value if is_valid else 180.0
 
 
 def _load_login_lock_timeout_seconds() -> float:
+    """環境変数 `LOGIN_LOCK_TIMEOUT_SECONDS` (未設定時は "180") をパースする。"""
     return _load_login_lock_timeout_seconds_from(
         os.environ.get("LOGIN_LOCK_TIMEOUT_SECONDS", "180")
     )
@@ -59,12 +60,11 @@ LOGIN_LOCK_TIMEOUT_SECONDS = _load_login_lock_timeout_seconds()
 
 
 @contextmanager
-def _acquire_login_lock(timeout: float):
+def _acquire_login_lock(timeout: float) -> Iterator[bool]:
     """`_login_lock` を bounded (timeout 付き) に取得する。
 
     Yields:
-        bool: 取得できたかどうか。取得できた場合のみ、with を抜ける際に
-        解放する (取得できなかった場合は release() 対象がないため呼ばない)。
+        bool: 取得できたかどうか。取得できた場合のみ、with を抜ける際に解放する。
     """
     acquired = _login_lock.acquire(timeout=timeout)
     try:
@@ -80,7 +80,7 @@ def _write_diagnostic_log(fields: dict) -> None:
     password/otp_secret/ct0/auth_token 等の機密値は呼び出し側 (do_POST) が
     そもそも fields に含めないため、ここでは追加のマスク処理を行わない。
     """
-    sys.stderr.write(json.dumps(fields, ensure_ascii=False) + "\n")
+    sys.stderr.write(json.dumps(fields) + "\n")
 
 
 def run_once() -> None:
@@ -133,14 +133,20 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
             return
 
         start = time.monotonic()
-        request_id = self.headers.get("X-Request-Id") or uuid.uuid4().hex
+        # request_id/caller は攻撃者が制御できる header 値なので、ログ肥大化を
+        # 防ぐため書き込み前に切り詰める (username も同様に body.get 直後で切り詰める)。
+        request_id = (self.headers.get("X-Request-Id") or uuid.uuid4().hex)[:256]
         caller = self.headers.get("X-Client-Name")
+        if caller is not None:
+            caller = caller[:256]
         username = None
         lock_wait_ms = None
         verify_ms = None
         login_ms = None
-        status = 500
-        result = "internal_error"
+        # None のままなら、後段で実際にレスポンスを返す前に例外が発生したことを示す
+        # (finally で誤って「500 を返した」と記録しないため)。
+        status = None
+        result = "no_response"
 
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -152,11 +158,13 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                 return
 
             username = body.get("username")
+            if isinstance(username, str):
+                username = username[:256]
             password = body.get("password")
             email = body.get("email")
             otp_secret = body.get("otp_secret")
 
-            if not username or not password:
+            if not (isinstance(username, str) and isinstance(password, str) and username and password):
                 status, result = 400, "bad_request"
                 self._send_json(
                     status, {"status": "error", "message": "username/password は必須です"}

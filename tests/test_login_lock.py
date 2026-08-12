@@ -3,9 +3,11 @@ import contextlib
 import inspect
 import io
 import json
+import os
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from src import __main__ as main_module
 from src.login import get_cookies
@@ -13,9 +15,9 @@ from src.login import get_cookies
 
 class TestLoadLoginLockTimeoutSeconds(unittest.TestCase):
     def test_default_when_unset(self):
-        self.assertEqual(
-            main_module._load_login_lock_timeout_seconds_from("__unset__"), 180.0
-        )
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LOGIN_LOCK_TIMEOUT_SECONDS", None)
+            self.assertEqual(main_module._load_login_lock_timeout_seconds(), 180.0)
 
     def test_default_when_not_numeric(self):
         self.assertEqual(
@@ -36,23 +38,26 @@ class TestLoadLoginLockTimeoutSeconds(unittest.TestCase):
 
 class TestAcquireLoginLock(unittest.TestCase):
     def setUp(self):
-        # 他のテストが保持したままにした状態を引き継がないよう、
-        # 各テストの開始時に新しい Lock に差し替える。
+        # 他のテストが保持したままにした状態を引き継がないよう新しい Lock に差し替える。
         main_module._login_lock = threading.Lock()
 
     def test_serializes_two_callers(self):
-        # first が lock を保持し続ける時間。second の acquire がこれより
-        # 早く成功したら「直列化されていない (並行実行された)」ことになる。
+        # second の acquire が hold_duration 未満で成功したら、
+        # 直列化されていない (並行実行された) ことになる。
         hold_duration = 0.3
+        acquired_event = threading.Event()
+        first_acquired = []
 
         def hold_lock():
             with main_module._acquire_login_lock(5.0) as acquired:
-                self.assertTrue(acquired)
+                first_acquired.append(acquired)
+                acquired_event.set()
                 time.sleep(hold_duration)
 
         first = threading.Thread(target=hold_lock)
         first.start()
-        time.sleep(0.05)  # first が確実に lock を保持し始めるのを待つ
+        self.assertTrue(acquired_event.wait(timeout=2.0))
+        self.assertEqual(first_acquired, [True])
 
         start = time.monotonic()
         with main_module._acquire_login_lock(5.0) as acquired:
@@ -60,8 +65,9 @@ class TestAcquireLoginLock(unittest.TestCase):
             self.assertTrue(acquired)
 
         first.join(timeout=2.0)
+        self.assertFalse(first.is_alive())
         # second は first の解放 (hold_duration 経過後) まで待たされたはず
-        # = 直列実行されている。多少の前段オーバーヘッドを考慮し 80% で判定する。
+        # = 直列実行されている。前段のスレッド起動オーバーヘッド分の余裕を持たせて判定する。
         self.assertGreaterEqual(elapsed, hold_duration * 0.8)
 
     def test_times_out_instead_of_failing_immediately(self):
@@ -84,6 +90,7 @@ class TestAcquireLoginLock(unittest.TestCase):
 
         release_event.set()
         holder.join(timeout=2.0)
+        self.assertFalse(holder.is_alive())
 
     def test_releases_lock_after_exception(self):
         with self.assertRaises(ValueError):
@@ -91,7 +98,6 @@ class TestAcquireLoginLock(unittest.TestCase):
                 self.assertTrue(acquired)
                 raise ValueError("boom")
 
-        # 例外後もロックが解放されていること (即座に再取得できる)
         with main_module._acquire_login_lock(1.0) as acquired:
             self.assertTrue(acquired)
 

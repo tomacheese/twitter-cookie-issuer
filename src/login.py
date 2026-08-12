@@ -480,8 +480,7 @@ def get_cookies(
 
     Args:
         timing: 渡された場合、実行した phase の所要時間 (ミリ秒) を
-            "verify_ms"/"login_ms" キーへ書き込む。呼び出し側の診断ログ用の
-            出力パラメータであり、デフォルト None なら計測しない。
+            "verify_ms"/"login_ms" キーへ書き込む出力パラメータ (呼び出し側の診断ログ用)。
 
     Raises:
         IndeterminateVerificationError: cookie の有効性を確定できなかった場合。
@@ -492,9 +491,11 @@ def get_cookies(
     cached = load_cached_cookies(cache_path)
     if cached:
         verify_start = time.monotonic()
-        result, latest = verify_and_refresh_cookie(cached, proxy)
-        if timing is not None:
-            timing["verify_ms"] = (time.monotonic() - verify_start) * 1000
+        try:
+            result, latest = verify_and_refresh_cookie(cached, proxy)
+        finally:
+            if timing is not None:
+                timing["verify_ms"] = (time.monotonic() - verify_start) * 1000
         _write_cache(
             cache_path,
             cookies=latest if result is VerificationResult.VALID else None,
@@ -523,8 +524,6 @@ def get_cookies(
             screenshot_username,
         )
     except LoginError as error:
-        if timing is not None:
-            timing["login_ms"] = (time.monotonic() - login_start) * 1000
         if cache_path.exists():
             _write_cache(
                 cache_path,
@@ -534,8 +533,9 @@ def get_cookies(
                 },
             )
         raise
-    if timing is not None:
-        timing["login_ms"] = (time.monotonic() - login_start) * 1000
+    finally:
+        if timing is not None:
+            timing["login_ms"] = (time.monotonic() - login_start) * 1000
 
     _write_cache(
         cache_path, cookies=result_cookies, metadata={"lastFullLoginAt": _now_iso()}

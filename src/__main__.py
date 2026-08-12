@@ -6,10 +6,15 @@ MODE 環境変数で実行モードを切り替える。
 - "daemon": HTTPサーバーとして常駐し、リクエストごとにログインする。
 """
 import json
+import math
 import os
 import re
 import sys
 import threading
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,6 +33,54 @@ _USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 # 同時に1件のログインしか実行しないための排他ロック。
 _login_lock = threading.Lock()
+
+
+def _load_login_lock_timeout_seconds_from(raw: str) -> float:
+    """`LOGIN_LOCK_TIMEOUT_SECONDS` の文字列値をパースする。
+
+    `float("inf")` はパースに成功するため、有限判定を別途行わないと
+    実質無制限待機を許してしまう。
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        return 180.0
+    is_valid = math.isfinite(value) and 0 < value <= threading.TIMEOUT_MAX
+    return value if is_valid else 180.0
+
+
+def _load_login_lock_timeout_seconds() -> float:
+    """環境変数 `LOGIN_LOCK_TIMEOUT_SECONDS` (未設定時は "180") をパースする。"""
+    return _load_login_lock_timeout_seconds_from(
+        os.environ.get("LOGIN_LOCK_TIMEOUT_SECONDS", "180")
+    )
+
+
+LOGIN_LOCK_TIMEOUT_SECONDS = _load_login_lock_timeout_seconds()
+
+
+@contextmanager
+def _acquire_login_lock(timeout: float) -> Iterator[bool]:
+    """`_login_lock` を bounded (timeout 付き) に取得する。
+
+    Yields:
+        bool: 取得できたかどうか。取得できた場合のみ、with を抜ける際に解放する。
+    """
+    acquired = _login_lock.acquire(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _login_lock.release()
+
+
+def _write_diagnostic_log(fields: dict) -> None:
+    """/login 1 request につき 1 行の JSON 診断ログを stderr へ出力する。
+
+    password/otp_secret/ct0/auth_token 等の機密値は呼び出し側 (do_POST) が
+    そもそも fields に含めないため、ここでは追加のマスク処理を行わない。
+    """
+    sys.stderr.write(json.dumps(fields) + "\n")
 
 
 def run_once() -> None:
@@ -79,63 +132,117 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"status": "error", "message": "not found"})
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        try:
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
-            self._send_json(400, {"status": "error", "message": "invalid JSON body"})
-            return
-
-        username = body.get("username")
-        password = body.get("password")
-        email = body.get("email")
-        otp_secret = body.get("otp_secret")
-
-        if not username or not password:
-            self._send_json(
-                400, {"status": "error", "message": "username/password は必須です"}
-            )
-            return
-
-        if not _USERNAME_PATTERN.match(username):
-            self._send_json(
-                400, {"status": "error", "message": "username の形式が不正です"}
-            )
-            return
-
-        if not _login_lock.acquire(blocking=False):
-            self._send_json(
-                409, {"status": "conflict", "message": "別のログイン処理を実行中です"}
-            )
-            return
+        start = time.monotonic()
+        # request_id/caller は攻撃者が制御できる header 値なので、ログ肥大化を
+        # 防ぐため書き込み前に切り詰める (username も同様に body.get 直後で切り詰める)。
+        request_id = (self.headers.get("X-Request-Id") or uuid.uuid4().hex)[:256]
+        caller = self.headers.get("X-Client-Name")
+        if caller is not None:
+            caller = caller[:256]
+        username = None
+        lock_wait_ms = None
+        verify_ms = None
+        login_ms = None
+        # None のままなら、後段で実際にレスポンスを返す前に例外が発生したことを示す
+        # (finally で誤って「500 を返した」と記録しないため)。
+        status = None
+        result = "no_response"
 
         try:
-            cache_path = COOKIES_DIR / f"{username}.json"
-            result = get_cookies(
-                username=username,
-                password=password,
-                email=email,
-                otp_secret=otp_secret,
-                cache_path=cache_path,
-                screenshot_dir=SCREENSHOTS_DIR,
-                screenshot_username=username,
-            )
-            self._send_json(200, {"status": "ok", **result})
-        except IndeterminateVerificationError as error:
-            self._send_json(503, {"status": "indeterminate", "message": str(error)})
-        except LoginError as error:
-            sentry_sdk.capture_exception(error)
-            payload = {"status": "error", "message": str(error)}
-            if error.screenshot_path:
-                payload["screenshot"] = str(error.screenshot_path)
-            self._send_json(500, payload)
-        except Exception as error:
-            sentry_sdk.capture_exception(error)
-            self._send_json(
-                500, {"status": "error", "message": "internal server error"}
-            )
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                status, result = 400, "bad_request"
+                self._send_json(status, {"status": "error", "message": "invalid JSON body"})
+                return
+
+            username = body.get("username")
+            if isinstance(username, str):
+                username = username[:256]
+            password = body.get("password")
+            email = body.get("email")
+            otp_secret = body.get("otp_secret")
+
+            if not (isinstance(username, str) and isinstance(password, str) and username and password):
+                status, result = 400, "bad_request"
+                self._send_json(
+                    status, {"status": "error", "message": "username/password は必須です"}
+                )
+                return
+
+            if not _USERNAME_PATTERN.match(username):
+                status, result = 400, "bad_request"
+                self._send_json(
+                    status, {"status": "error", "message": "username の形式が不正です"}
+                )
+                return
+
+            lock_wait_start = time.monotonic()
+            with _acquire_login_lock(LOGIN_LOCK_TIMEOUT_SECONDS) as acquired:
+                lock_wait_ms = (time.monotonic() - lock_wait_start) * 1000
+                if not acquired:
+                    status, result = 409, "lock_timeout"
+                    self._send_json(
+                        status,
+                        {
+                            "status": "conflict",
+                            "message": "ログイン処理の待機がタイムアウトしました",
+                        },
+                    )
+                    return
+
+                timing: dict[str, float] = {}
+                try:
+                    cache_path = COOKIES_DIR / f"{username}.json"
+                    cookies_result = get_cookies(
+                        username=username,
+                        password=password,
+                        email=email,
+                        otp_secret=otp_secret,
+                        cache_path=cache_path,
+                        screenshot_dir=SCREENSHOTS_DIR,
+                        screenshot_username=username,
+                        timing=timing,
+                    )
+                    status, result = 200, "ok"
+                    self._send_json(status, {"status": "ok", **cookies_result})
+                except IndeterminateVerificationError as error:
+                    status, result = 503, "indeterminate"
+                    self._send_json(
+                        status, {"status": "indeterminate", "message": str(error)}
+                    )
+                except LoginError as error:
+                    sentry_sdk.capture_exception(error)
+                    status, result = 500, "login_error"
+                    payload = {"status": "error", "message": str(error)}
+                    if error.screenshot_path:
+                        payload["screenshot"] = str(error.screenshot_path)
+                    self._send_json(status, payload)
+                except Exception as error:
+                    sentry_sdk.capture_exception(error)
+                    status, result = 500, "internal_error"
+                    self._send_json(
+                        status, {"status": "error", "message": "internal server error"}
+                    )
+                finally:
+                    verify_ms = timing.get("verify_ms")
+                    login_ms = timing.get("login_ms")
         finally:
-            _login_lock.release()
+            total_ms = (time.monotonic() - start) * 1000
+            _write_diagnostic_log(
+                {
+                    "request_id": request_id,
+                    "caller": caller,
+                    "username": username,
+                    "lock_wait_ms": lock_wait_ms,
+                    "verify_ms": verify_ms,
+                    "login_ms": login_ms,
+                    "total_ms": total_ms,
+                    "status": status,
+                    "result": result,
+                }
+            )
 
     def _send_json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")

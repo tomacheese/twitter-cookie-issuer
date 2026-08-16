@@ -23,6 +23,13 @@ class TestScrubReprStringDataclassFormat(unittest.TestCase):
         self.assertIn("ct0='[Filtered]'", result)
         self.assertIn("auth_token='[Filtered]'", result)
 
+    def test_escaped_quote_inside_value_does_not_leak_a_fragment(self):
+        text = "OnceConfig(password='a\\\"b', otp_secret='c')"
+        result = _scrub_repr_string(text)
+        self.assertNotIn("a\\\"b", result)
+        self.assertIn("password='[Filtered]'", result)
+        self.assertIn("otp_secret='[Filtered]'", result)
+
 
 class TestScrubReprStringJsonFormat(unittest.TestCase):
     """json.dumps() が生成する "key": "value" 形式が scrub されることの確認。"""
@@ -42,6 +49,19 @@ class TestScrubReprStringJsonFormat(unittest.TestCase):
         self.assertNotIn(DUMMY_AUTH_TOKEN, result)
         self.assertIn('"ct0":"[Filtered]"', result)
         self.assertIn('"auth_token":"[Filtered]"', result)
+
+    def test_escaped_quote_inside_json_value_does_not_leak_a_fragment(self):
+        text = f'{{"ct0": "{DUMMY_CT0}\\"suffix", "x": 1}}'
+        result = _scrub_repr_string(text)
+        self.assertNotIn(DUMMY_CT0, result)
+        self.assertIn('"ct0": "[Filtered]"', result)
+
+    def test_generic_code_key_in_json_is_not_over_matched(self):
+        """JSON 記法での scrub 対象は ct0/auth_token に限定され、"code" は残ることの確認。"""
+        text = '{"data": {"ct0": "' + DUMMY_CT0 + '"}, "code": "some-diagnostic-code"}'
+        result = _scrub_repr_string(text)
+        self.assertIn('"ct0": "[Filtered]"', result)
+        self.assertIn('"code": "some-diagnostic-code"', result)
 
 
 class TestScrubValueBytes(unittest.TestCase):
@@ -72,10 +92,16 @@ class TestScrubValueBytes(unittest.TestCase):
         result = _scrub_value(body)
         self.assertEqual(result, body)
 
+    def test_secret_next_to_non_utf8_bytes_is_still_scrubbed(self):
+        """非 UTF-8 バイトが混在していても、UTF-8 部分の秘密値は scrub されることの確認。"""
+        body = b'{"ct0": "' + DUMMY_CT0.encode("utf-8") + b'", "blob": "\xff\xfe"}'
+        result = _scrub_value(body)
+        self.assertIsInstance(result, bytes)
+        self.assertNotIn(DUMMY_CT0.encode("utf-8"), result)
+
 
 class TestScrubBeforeSendResponseBody(unittest.TestCase):
-    """_scrub_before_send が stack-frame locals 中の serialized response body を scrub することの
-    end-to-end に近い回帰確認。"""
+    """_scrub_before_send がスタックフレーム locals 中の response body を scrub することの確認。"""
 
     def _build_event_with_body_var(self, body):
         return {
@@ -96,7 +122,25 @@ class TestScrubBeforeSendResponseBody(unittest.TestCase):
             }
         }
 
+    def test_sentry_repr_of_bytes_body_is_scrubbed(self):
+        """Sentry SDK は before_send 実行前にフレーム変数の bytes を repr() 済み
+        文字列 (例: "b'{\\"ct0\\": \\"...\\"}'") へ変換するため、実際に本番で
+        before_send に渡るのはこの str 表現である。この形が scrub されることの確認。"""
+        body_repr = "b'%s'" % json.dumps(
+            {"status": "ok", "ct0": DUMMY_CT0, "auth_token": DUMMY_AUTH_TOKEN}
+        )
+        event = self._build_event_with_body_var(body_repr)
+
+        result = _scrub_before_send(event, {})
+
+        scrubbed_body = result["exception"]["values"][0]["stacktrace"]["frames"][0][
+            "vars"
+        ]["body"]
+        self.assertNotIn(DUMMY_CT0, scrubbed_body)
+        self.assertNotIn(DUMMY_AUTH_TOKEN, scrubbed_body)
+
     def test_bytes_body_is_scrubbed_from_stack_frame_vars(self):
+        """_scrub_value の bytes 対応 (extra 等、他経路向けの defense-in-depth) の確認。"""
         body = json.dumps(
             {"status": "ok", "ct0": DUMMY_CT0, "auth_token": DUMMY_AUTH_TOKEN}
         ).encode("utf-8")

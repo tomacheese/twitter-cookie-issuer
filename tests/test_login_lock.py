@@ -1,4 +1,6 @@
-"""/login のロック排他制御 (bounded wait) の回帰テスト。"""
+"""/login のロック排他制御 (bounded wait) と、response 書き込み時の
+peer disconnect (BrokenPipeError 等) 処理の回帰テスト。
+"""
 import contextlib
 import inspect
 import io
@@ -7,7 +9,7 @@ import os
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src import __main__ as main_module
 from src.login import get_cookies
@@ -132,6 +134,82 @@ class TestWriteDiagnosticLog(unittest.TestCase):
         self.assertEqual(parsed, fields)
         for secret_key in ("password", "otp_secret", "ct0", "auth_token"):
             self.assertNotIn(secret_key, parsed)
+
+
+class TestSendJsonPeerDisconnect(unittest.TestCase):
+    def _make_handler(self, write_side_effect=None):
+        handler = object.__new__(main_module.LoginRequestHandler)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+        if write_side_effect is not None:
+            handler.wfile.write.side_effect = write_side_effect
+        return handler
+
+    def test_returns_true_on_successful_write(self):
+        handler = self._make_handler()
+        result = handler._send_json(200, {"status": "ok"})
+        self.assertTrue(result)
+        handler.wfile.write.assert_called_once()
+
+    def test_broken_pipe_returns_false_without_raising(self):
+        handler = self._make_handler(write_side_effect=BrokenPipeError())
+        result = handler._send_json(200, {"status": "ok"})
+        self.assertFalse(result)
+
+    def test_connection_reset_returns_false_without_raising(self):
+        handler = self._make_handler(write_side_effect=ConnectionResetError())
+        result = handler._send_json(200, {"status": "ok"})
+        self.assertFalse(result)
+
+    def test_connection_aborted_returns_false_without_raising(self):
+        handler = self._make_handler(write_side_effect=ConnectionAbortedError())
+        result = handler._send_json(200, {"status": "ok"})
+        self.assertFalse(result)
+
+
+class TestDoPostClientDisconnected(unittest.TestCase):
+    def setUp(self):
+        main_module._login_lock = threading.Lock()
+
+    def _do_post_with_write_failure(self, write_side_effect):
+        handler = object.__new__(main_module.LoginRequestHandler)
+        handler.path = "/login"
+        body = json.dumps(
+            {"username": "example_user", "password": "pw"}
+        ).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+        handler.wfile.write.side_effect = write_side_effect
+
+        logged = {}
+
+        def fake_write_log(fields):
+            logged.update(fields)
+
+        with (
+            patch.object(main_module, "_write_diagnostic_log", side_effect=fake_write_log),
+            patch.object(
+                main_module, "get_cookies", return_value={"ct0": "x", "auth_token": "y"}
+            ),
+            patch("src.__main__.sentry_sdk.capture_exception") as mock_capture,
+        ):
+            handler.do_POST()
+
+        return logged, mock_capture
+
+    def test_result_kept_and_client_disconnected_flagged_on_peer_disconnect_during_200_response(self):
+        logged, mock_capture = self._do_post_with_write_failure(BrokenPipeError())
+
+        self.assertEqual(logged["status"], 200)
+        self.assertEqual(logged["result"], "ok")
+        self.assertTrue(logged["client_disconnected"])
+        mock_capture.assert_not_called()
 
 
 if __name__ == "__main__":

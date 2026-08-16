@@ -1,4 +1,6 @@
-"""/login のロック排他制御 (bounded wait) の回帰テスト。"""
+"""/login のロック排他制御 (bounded wait) と、response 書き込み時の
+peer disconnect (BrokenPipeError 等) 処理の回帰テスト。
+"""
 import contextlib
 import inspect
 import io
@@ -153,40 +155,37 @@ class TestSendJsonPeerDisconnect(unittest.TestCase):
 
     def test_broken_pipe_returns_false_without_raising(self):
         handler = self._make_handler(write_side_effect=BrokenPipeError())
-        with patch("src.__main__.sentry_sdk.capture_exception") as mock_capture:
-            result = handler._send_json(200, {"status": "ok"})
+        result = handler._send_json(200, {"status": "ok"})
         self.assertFalse(result)
-        mock_capture.assert_not_called()
 
     def test_connection_reset_returns_false_without_raising(self):
         handler = self._make_handler(write_side_effect=ConnectionResetError())
-        with patch("src.__main__.sentry_sdk.capture_exception") as mock_capture:
-            result = handler._send_json(200, {"status": "ok"})
+        result = handler._send_json(200, {"status": "ok"})
         self.assertFalse(result)
-        mock_capture.assert_not_called()
 
     def test_connection_aborted_returns_false_without_raising(self):
         handler = self._make_handler(write_side_effect=ConnectionAbortedError())
-        with patch("src.__main__.sentry_sdk.capture_exception") as mock_capture:
-            result = handler._send_json(200, {"status": "ok"})
+        result = handler._send_json(200, {"status": "ok"})
         self.assertFalse(result)
-        mock_capture.assert_not_called()
 
 
 class TestDoPostClientDisconnected(unittest.TestCase):
     def setUp(self):
         main_module._login_lock = threading.Lock()
 
-    def test_result_overwritten_on_peer_disconnect_during_200_response(self):
+    def _do_post_with_write_failure(self, write_side_effect):
         handler = object.__new__(main_module.LoginRequestHandler)
-        handler.headers = {}
         handler.path = "/login"
         body = json.dumps(
             {"username": "example_user", "password": "pw"}
         ).encode("utf-8")
         handler.headers = {"Content-Length": str(len(body))}
         handler.rfile = io.BytesIO(body)
-        handler._send_json = MagicMock(return_value=False)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+        handler.wfile.write.side_effect = write_side_effect
 
         logged = {}
 
@@ -198,11 +197,19 @@ class TestDoPostClientDisconnected(unittest.TestCase):
             patch.object(
                 main_module, "get_cookies", return_value={"ct0": "x", "auth_token": "y"}
             ),
+            patch("src.__main__.sentry_sdk.capture_exception") as mock_capture,
         ):
             handler.do_POST()
 
-        self.assertEqual(logged["result"], "client_disconnected")
+        return logged, mock_capture
+
+    def test_result_kept_and_client_disconnected_flagged_on_peer_disconnect_during_200_response(self):
+        logged, mock_capture = self._do_post_with_write_failure(BrokenPipeError())
+
         self.assertEqual(logged["status"], 200)
+        self.assertEqual(logged["result"], "ok")
+        self.assertTrue(logged["client_disconnected"])
+        mock_capture.assert_not_called()
 
 
 if __name__ == "__main__":

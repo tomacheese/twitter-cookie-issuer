@@ -147,6 +147,12 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
         # (finally で誤って「500 を返した」と記録しないため)。
         status = None
         result = "no_response"
+        # result は「server がどう処理したか」を表すため、response 書き込み時の
+        # peer disconnect (client_disconnected) で上書きしない。login_error/
+        # internal_error はどちらも status=500 になり result でしか区別できず、
+        # 200 の場合は result を上書きすると成功した login が見かけ上失敗扱いに
+        # なるため、書き込み成否は別フィールドとして記録する。
+        client_disconnected = False
 
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -154,8 +160,9 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
             except json.JSONDecodeError:
                 status, result = 400, "bad_request"
-                if not self._send_json(status, {"status": "error", "message": "invalid JSON body"}):
-                    result = "client_disconnected"
+                client_disconnected = not self._send_json(
+                    status, {"status": "error", "message": "invalid JSON body"}
+                )
                 return
 
             username = body.get("username")
@@ -167,18 +174,16 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
 
             if not (isinstance(username, str) and isinstance(password, str) and username and password):
                 status, result = 400, "bad_request"
-                if not self._send_json(
+                client_disconnected = not self._send_json(
                     status, {"status": "error", "message": "username/password は必須です"}
-                ):
-                    result = "client_disconnected"
+                )
                 return
 
             if not _USERNAME_PATTERN.match(username):
                 status, result = 400, "bad_request"
-                if not self._send_json(
+                client_disconnected = not self._send_json(
                     status, {"status": "error", "message": "username の形式が不正です"}
-                ):
-                    result = "client_disconnected"
+                )
                 return
 
             lock_wait_start = time.monotonic()
@@ -186,14 +191,13 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                 lock_wait_ms = (time.monotonic() - lock_wait_start) * 1000
                 if not acquired:
                     status, result = 409, "lock_timeout"
-                    if not self._send_json(
+                    client_disconnected = not self._send_json(
                         status,
                         {
                             "status": "conflict",
                             "message": "ログイン処理の待機がタイムアウトしました",
                         },
-                    ):
-                        result = "client_disconnected"
+                    )
                     return
 
                 timing: dict[str, float] = {}
@@ -210,29 +214,27 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                         timing=timing,
                     )
                     status, result = 200, "ok"
-                    if not self._send_json(status, {"status": "ok", **cookies_result}):
-                        result = "client_disconnected"
+                    client_disconnected = not self._send_json(
+                        status, {"status": "ok", **cookies_result}
+                    )
                 except IndeterminateVerificationError as error:
                     status, result = 503, "indeterminate"
-                    if not self._send_json(
+                    client_disconnected = not self._send_json(
                         status, {"status": "indeterminate", "message": str(error)}
-                    ):
-                        result = "client_disconnected"
+                    )
                 except LoginError as error:
                     sentry_sdk.capture_exception(error)
                     status, result = 500, "login_error"
                     payload = {"status": "error", "message": str(error)}
                     if error.screenshot_path:
                         payload["screenshot"] = str(error.screenshot_path)
-                    if not self._send_json(status, payload):
-                        result = "client_disconnected"
+                    client_disconnected = not self._send_json(status, payload)
                 except Exception as error:
                     sentry_sdk.capture_exception(error)
                     status, result = 500, "internal_error"
-                    if not self._send_json(
+                    client_disconnected = not self._send_json(
                         status, {"status": "error", "message": "internal server error"}
-                    ):
-                        result = "client_disconnected"
+                    )
                 finally:
                     verify_ms = timing.get("verify_ms")
                     login_ms = timing.get("login_ms")
@@ -249,21 +251,18 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                     "total_ms": total_ms,
                     "status": status,
                     "result": result,
+                    "client_disconnected": client_disconnected,
                 }
             )
 
     def _send_json(self, status: int, payload: dict) -> bool:
-        """JSON response を書き込む。
+        """JSON response を書き込み、書き込みに成功したかを返す。
 
-        client が既に切断している場合、書き込み中に BrokenPipeError 等の
-        transport error が発生し得る。peer disconnect は想定内の事象であり
-        server 側処理自体は正常に完了しているため、Sentry への capture は
-        行わず、呼び出し元 (do_POST) が診断ログへ反映できるよう戻り値で
-        書き込み成否のみを伝える。
+        peer disconnect は想定内の事象であり server 側処理は正常に完了して
+        いるため、Sentry へは capture せず、戻り値のみで呼び出し元へ伝える。
 
         Returns:
-            bool: 書き込みに成功したら True、peer disconnect により失敗
-                したら False。
+            bool: peer disconnect により書き込みが失敗したら False。
         """
         body = json.dumps(payload).encode("utf-8")
         try:

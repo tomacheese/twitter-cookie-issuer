@@ -11,13 +11,21 @@ import sentry_sdk
 _SENSITIVE_KEYS = {"password", "otp_secret", "code", "ct0", "auth_token"}
 
 # dataclass 等の repr() 文字列 (例: "OnceConfig(password='...', otp_secret='...')")
+# および json.dumps() が生成する JSON 文字列 (例: '{"ct0": "...", "auth_token": "..."}')
 # 中の機密フィールドをマスクするための正規表現。Sentry SDK は before_send 実行前に
 # フレームのローカル変数を dict/list 以外はすべて repr() 済み文字列へ変換するため、
-# キーベースの dict 走査だけでは OnceConfig のような dataclass のフィールドを
-# 検出できない。
+# キーベースの dict 走査だけでは OnceConfig のような dataclass のフィールドや、
+# json.dumps() 済みの response body (bytes/str) を検出できない。
+# dataclass repr (key='value', キー非クォート, `=` 区切り) と JSON (キーもクォート
+# される "key": "value", `:` 区切り、コロン前後の空白は可変) の両方にマッチさせ、
+# 置換時は元のキーのクォート有無・区切り文字・空白をそのまま保ち、値部分のみ
+# マスクする。
 _SENSITIVE_REPR_PATTERN = re.compile(
+    r"(?P<keyquote>['\"])?"
     r"(?P<key>" + "|".join(re.escape(key) for key in _SENSITIVE_KEYS) + r")"
-    r"=(?P<quote>['\"]).*?(?P=quote)",
+    r"(?(keyquote)(?P=keyquote))"
+    r"(?P<sep>\s*[:=]\s*)"
+    r"(?P<quote>['\"]).*?(?P=quote)",
     re.IGNORECASE,
 )
 
@@ -90,13 +98,16 @@ def _scrub_value(value):
 
 
 def _scrub_repr_string(text: str) -> str:
-    """`key='value'` 形式の機密フィールドと、実際の秘密値そのものをマスクする。
+    """`key='value'` / `"key": "value"` 形式の機密フィールドと、実際の秘密値そのものをマスクする。
 
     後者は patchright 側の `text` 引数のように機密値が別名の変数に束縛され、
     `_SENSITIVE_REPR_PATTERN` のキー一致では検出できない場合の保険。
     """
     text = _SENSITIVE_REPR_PATTERN.sub(
-        lambda m: f"{m.group('key')}={m.group('quote')}[Filtered]{m.group('quote')}",
+        lambda m: (
+            f"{m.group('keyquote') or ''}{m.group('key')}{m.group('keyquote') or ''}"
+            f"{m.group('sep')}{m.group('quote')}[Filtered]{m.group('quote')}"
+        ),
         text,
     )
     for env_var in _SENSITIVE_ENV_VARS:

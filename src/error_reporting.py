@@ -82,8 +82,10 @@ def _scrub_before_send(event: dict, hint: dict) -> dict:
 def _scrub_value(value):
     """dict/list を再帰的に走査し、機密キーの値を "[Filtered]" に置換する。
 
-    dict/list 以外の値 (例: dataclass の repr() 済み文字列) は、キーの一致では
-    検出できないため `_scrub_repr_string` によるパターンマッチでマスクする。
+    dict/list 以外の値 (例: dataclass の repr() 済み文字列、json.dumps() 済みの
+    bytes) は、キーの一致では検出できないため `_scrub_repr_string` によるパターン
+    マッチでマスクする。bytes は UTF-8 としてデコードできる場合のみスクラブし、
+    デコードできないバイナリ値はそのまま返す。
     """
     if isinstance(value, dict):
         return {
@@ -94,6 +96,13 @@ def _scrub_value(value):
         return [_scrub_value(item) for item in value]
     if isinstance(value, str):
         return _scrub_repr_string(value)
+    if isinstance(value, bytes):
+        try:
+            decoded = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value
+        scrubbed = _scrub_repr_string(decoded)
+        return scrubbed.encode("utf-8") if scrubbed != decoded else value
     return value
 
 

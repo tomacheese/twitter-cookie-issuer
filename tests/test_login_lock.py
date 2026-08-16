@@ -173,5 +173,37 @@ class TestSendJsonPeerDisconnect(unittest.TestCase):
         mock_capture.assert_not_called()
 
 
+class TestDoPostClientDisconnected(unittest.TestCase):
+    def setUp(self):
+        main_module._login_lock = threading.Lock()
+
+    def test_result_overwritten_on_peer_disconnect_during_200_response(self):
+        handler = object.__new__(main_module.LoginRequestHandler)
+        handler.headers = {}
+        handler.path = "/login"
+        body = json.dumps(
+            {"username": "example_user", "password": "pw"}
+        ).encode("utf-8")
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler._send_json = MagicMock(return_value=False)
+
+        logged = {}
+
+        def fake_write_log(fields):
+            logged.update(fields)
+
+        with (
+            patch.object(main_module, "_write_diagnostic_log", side_effect=fake_write_log),
+            patch.object(
+                main_module, "get_cookies", return_value={"ct0": "x", "auth_token": "y"}
+            ),
+        ):
+            handler.do_POST()
+
+        self.assertEqual(logged["result"], "client_disconnected")
+        self.assertEqual(logged["status"], 200)
+
+
 if __name__ == "__main__":
     unittest.main()

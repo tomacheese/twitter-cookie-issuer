@@ -154,7 +154,8 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
             except json.JSONDecodeError:
                 status, result = 400, "bad_request"
-                self._send_json(status, {"status": "error", "message": "invalid JSON body"})
+                if not self._send_json(status, {"status": "error", "message": "invalid JSON body"}):
+                    result = "client_disconnected"
                 return
 
             username = body.get("username")
@@ -166,16 +167,18 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
 
             if not (isinstance(username, str) and isinstance(password, str) and username and password):
                 status, result = 400, "bad_request"
-                self._send_json(
+                if not self._send_json(
                     status, {"status": "error", "message": "username/password は必須です"}
-                )
+                ):
+                    result = "client_disconnected"
                 return
 
             if not _USERNAME_PATTERN.match(username):
                 status, result = 400, "bad_request"
-                self._send_json(
+                if not self._send_json(
                     status, {"status": "error", "message": "username の形式が不正です"}
-                )
+                ):
+                    result = "client_disconnected"
                 return
 
             lock_wait_start = time.monotonic()
@@ -183,13 +186,14 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                 lock_wait_ms = (time.monotonic() - lock_wait_start) * 1000
                 if not acquired:
                     status, result = 409, "lock_timeout"
-                    self._send_json(
+                    if not self._send_json(
                         status,
                         {
                             "status": "conflict",
                             "message": "ログイン処理の待機がタイムアウトしました",
                         },
-                    )
+                    ):
+                        result = "client_disconnected"
                     return
 
                 timing: dict[str, float] = {}
@@ -206,25 +210,29 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                         timing=timing,
                     )
                     status, result = 200, "ok"
-                    self._send_json(status, {"status": "ok", **cookies_result})
+                    if not self._send_json(status, {"status": "ok", **cookies_result}):
+                        result = "client_disconnected"
                 except IndeterminateVerificationError as error:
                     status, result = 503, "indeterminate"
-                    self._send_json(
+                    if not self._send_json(
                         status, {"status": "indeterminate", "message": str(error)}
-                    )
+                    ):
+                        result = "client_disconnected"
                 except LoginError as error:
                     sentry_sdk.capture_exception(error)
                     status, result = 500, "login_error"
                     payload = {"status": "error", "message": str(error)}
                     if error.screenshot_path:
                         payload["screenshot"] = str(error.screenshot_path)
-                    self._send_json(status, payload)
+                    if not self._send_json(status, payload):
+                        result = "client_disconnected"
                 except Exception as error:
                     sentry_sdk.capture_exception(error)
                     status, result = 500, "internal_error"
-                    self._send_json(
+                    if not self._send_json(
                         status, {"status": "error", "message": "internal server error"}
-                    )
+                    ):
+                        result = "client_disconnected"
                 finally:
                     verify_ms = timing.get("verify_ms")
                     login_ms = timing.get("login_ms")

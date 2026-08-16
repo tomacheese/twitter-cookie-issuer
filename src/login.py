@@ -208,6 +208,7 @@ def verify_and_refresh_cookie(
     with sync_playwright() as p:
         browser, context = _launch_context(p, proxy)
         try:
+            injection_start = time.monotonic()
             try:
                 context.add_cookies(
                     [
@@ -226,12 +227,32 @@ def verify_and_refresh_cookie(
                     ]
                 )
                 page = context.new_page()
-                page.goto("https://x.com/home", wait_until="load", timeout=30000)
             except Exception as exc:
+                elapsed_ms = round((time.monotonic() - injection_start) * 1000)
                 # 例外の詳細 (frame local 経由) を送ると cookie 値の生の値が
                 # 漏洩しうるため、種別のみを通知する。
                 sentry_sdk.capture_message(
-                    f"cookie 検証中に {type(exc).__name__} が発生したため判定不能としました",
+                    f"cookie 検証中に {type(exc).__name__} が発生したため判定不能としました"
+                    f" (phase=cookie_injection elapsed_ms={elapsed_ms})",
+                    level="warning",
+                )
+                return VerificationResult.INDETERMINATE, None
+
+            navigation_start = time.monotonic()
+            try:
+                _goto_with_retry(page, "https://x.com/home", 30000)
+            except Exception as exc:
+                elapsed_ms = round((time.monotonic() - navigation_start) * 1000)
+                try:
+                    final_url = _sanitize_url(page.url)
+                except Exception:
+                    final_url = None
+                detail = f"phase=navigation elapsed_ms={elapsed_ms}"
+                if final_url is not None:
+                    detail += f" final_url={final_url}"
+                sentry_sdk.capture_message(
+                    f"cookie 検証中に {type(exc).__name__} が発生したため判定不能としました"
+                    f" ({detail})",
                     level="warning",
                 )
                 return VerificationResult.INDETERMINATE, None

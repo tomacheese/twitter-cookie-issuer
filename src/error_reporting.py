@@ -10,14 +10,27 @@ import sentry_sdk
 # ログイン中一時的にローカル変数として保持される TOTP コードも対象に含める。
 _SENSITIVE_KEYS = {"password", "otp_secret", "code", "ct0", "auth_token"}
 
-# dataclass 等の repr() 文字列 (例: "OnceConfig(password='...', otp_secret='...')")
-# 中の機密フィールドをマスクするための正規表現。Sentry SDK は before_send 実行前に
-# フレームのローカル変数を dict/list 以外はすべて repr() 済み文字列へ変換するため、
-# キーベースの dict 走査だけでは OnceConfig のような dataclass のフィールドを
-# 検出できない。
+# dataclass の repr() 文字列 (例: "OnceConfig(password='...')") と、json.dumps()
+# 済み文字列に残る JSON 記法 (例: '{"ct0": "..."}') の両方から機密フィールドを
+# マスクする正規表現。Sentry SDK が before_send 実行前にフレーム変数を repr()
+# 済み文字列へ変換するため、キーベースの dict 走査だけでは検出できない。
+#
+# JSON 記法側でマスクするキーは ct0/auth_token に限定する。password/otp_secret/
+# code はこのツールの JSON response payload に現れず、"code" のような汎用的な
+# フィールド名まで対象にすると無関係な診断情報を消してしまう。
+_JSON_SENSITIVE_KEYS = {"ct0", "auth_token"}
+
+# 値中のエスケープ済みクォート (`\"`) を閉じクォートと誤認すると秘密値が途中で
+# 切れて断片が漏洩するため、`\\.` で読み飛ばして終端を判定する。
+_SENSITIVE_KEYS_PATTERN = "|".join(re.escape(key) for key in _SENSITIVE_KEYS)
+_JSON_SENSITIVE_KEYS_PATTERN = "|".join(re.escape(key) for key in _JSON_SENSITIVE_KEYS)
 _SENSITIVE_REPR_PATTERN = re.compile(
-    r"(?P<key>" + "|".join(re.escape(key) for key in _SENSITIVE_KEYS) + r")"
-    r"=(?P<quote>['\"]).*?(?P=quote)",
+    r"(?P<key>" + _SENSITIVE_KEYS_PATTERN + r")"
+    r"=(?P<quote1>['\"])(?:\\.|(?!(?P=quote1)).)*(?P=quote1)"
+    r"|"
+    r"(?P<jquote>['\"])(?P<jkey>" + _JSON_SENSITIVE_KEYS_PATTERN + r")(?P=jquote)"
+    r"(?P<jsep>\s*:\s*)"
+    r"(?P<quote2>['\"])(?:\\.|(?!(?P=quote2)).)*(?P=quote2)",
     re.IGNORECASE,
 )
 
@@ -76,6 +89,9 @@ def _scrub_value(value):
 
     dict/list 以外の値 (例: dataclass の repr() 済み文字列) は、キーの一致では
     検出できないため `_scrub_repr_string` によるパターンマッチでマスクする。
+    Sentry のスタックフレーム変数には repr() 済み文字列しか渡らないが、
+    event["extra"]/["contexts"]/["request"] に将来 bytes 値が設定された場合に
+    備え、bytes も同様に scrub する (UTF-8 でデコードできない値はそのまま返す)。
     """
     if isinstance(value, dict):
         return {
@@ -86,17 +102,29 @@ def _scrub_value(value):
         return [_scrub_value(item) for item in value]
     if isinstance(value, str):
         return _scrub_repr_string(value)
+    if isinstance(value, bytes):
+        decoded = value.decode("utf-8", "surrogateescape")
+        scrubbed = _scrub_repr_string(decoded)
+        return scrubbed.encode("utf-8", "surrogateescape") if scrubbed != decoded else value
     return value
 
 
 def _scrub_repr_string(text: str) -> str:
-    """`key='value'` 形式の機密フィールドと、実際の秘密値そのものをマスクする。
+    """`key='value'` / `"key": "value"` 形式の機密フィールドと、実際の秘密値そのものをマスクする。
 
     後者は patchright 側の `text` 引数のように機密値が別名の変数に束縛され、
     `_SENSITIVE_REPR_PATTERN` のキー一致では検出できない場合の保険。
     """
+    def _replace(m: "re.Match[str]") -> str:
+        if m.group("key") is not None:
+            return f"{m.group('key')}={m.group('quote1')}[Filtered]{m.group('quote1')}"
+        return (
+            f"{m.group('jquote')}{m.group('jkey')}{m.group('jquote')}"
+            f"{m.group('jsep')}{m.group('quote2')}[Filtered]{m.group('quote2')}"
+        )
+
     text = _SENSITIVE_REPR_PATTERN.sub(
-        lambda m: f"{m.group('key')}={m.group('quote')}[Filtered]{m.group('quote')}",
+        _replace,
         text,
     )
     for env_var in _SENSITIVE_ENV_VARS:

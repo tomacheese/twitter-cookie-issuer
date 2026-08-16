@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src import __main__ as main_module
 from src.login import get_cookies
@@ -132,6 +132,45 @@ class TestWriteDiagnosticLog(unittest.TestCase):
         self.assertEqual(parsed, fields)
         for secret_key in ("password", "otp_secret", "ct0", "auth_token"):
             self.assertNotIn(secret_key, parsed)
+
+
+class TestSendJsonPeerDisconnect(unittest.TestCase):
+    def _make_handler(self, write_side_effect=None):
+        handler = object.__new__(main_module.LoginRequestHandler)
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+        if write_side_effect is not None:
+            handler.wfile.write.side_effect = write_side_effect
+        return handler
+
+    def test_returns_true_on_successful_write(self):
+        handler = self._make_handler()
+        result = handler._send_json(200, {"status": "ok"})
+        self.assertTrue(result)
+        handler.wfile.write.assert_called_once()
+
+    def test_broken_pipe_returns_false_without_raising(self):
+        handler = self._make_handler(write_side_effect=BrokenPipeError())
+        with patch("src.__main__.sentry_sdk.capture_exception") as mock_capture:
+            result = handler._send_json(200, {"status": "ok"})
+        self.assertFalse(result)
+        mock_capture.assert_not_called()
+
+    def test_connection_reset_returns_false_without_raising(self):
+        handler = self._make_handler(write_side_effect=ConnectionResetError())
+        with patch("src.__main__.sentry_sdk.capture_exception") as mock_capture:
+            result = handler._send_json(200, {"status": "ok"})
+        self.assertFalse(result)
+        mock_capture.assert_not_called()
+
+    def test_connection_aborted_returns_false_without_raising(self):
+        handler = self._make_handler(write_side_effect=ConnectionAbortedError())
+        with patch("src.__main__.sentry_sdk.capture_exception") as mock_capture:
+            result = handler._send_json(200, {"status": "ok"})
+        self.assertFalse(result)
+        mock_capture.assert_not_called()
 
 
 if __name__ == "__main__":

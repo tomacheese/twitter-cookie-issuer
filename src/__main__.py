@@ -244,13 +244,29 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
                 }
             )
 
-    def _send_json(self, status: int, payload: dict) -> None:
+    def _send_json(self, status: int, payload: dict) -> bool:
+        """JSON response を書き込む。
+
+        client が既に切断している場合、書き込み中に BrokenPipeError 等の
+        transport error が発生し得る。peer disconnect は想定内の事象であり
+        server 側処理自体は正常に完了しているため、Sentry への capture は
+        行わず、呼び出し元 (do_POST) が診断ログへ反映できるよう戻り値で
+        書き込み成否のみを伝える。
+
+        Returns:
+            bool: 書き込みに成功したら True、peer disconnect により失敗
+                したら False。
+        """
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return False
+        return True
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         # BaseHTTPRequestHandler のデフォルトはアクセスログを stderr に出すため、そのまま stderr に出力する (握りつぶさない)。

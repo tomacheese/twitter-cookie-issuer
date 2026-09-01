@@ -239,9 +239,21 @@ def verify_and_refresh_cookie(
                 return VerificationResult.INDETERMINATE, None
 
             navigation_start = time.monotonic()
+            navigation_error: Exception | None = None
             try:
                 _goto_with_retry(page, "https://x.com/home", 30000)
             except Exception as exc:
+                navigation_error = exc
+
+            # goto 自体が timeout しても、x.com の SPA は "load" イベントが
+            # 発火しないまま既に /home への遷移を完了していることがある
+            # 実運用で final_url=x.com/home のまま timeout するケースを確認済み。
+            # そのため timeout を即
+            # cookie 失効扱いにせず、通常成功時と同じページ状態チェックに
+            # 委ねる。
+            if navigation_error is not None and not page.url.startswith(
+                "https://x.com/home"
+            ):
                 elapsed_ms = round((time.monotonic() - navigation_start) * 1000)
                 try:
                     final_url = _sanitize_url(page.url)
@@ -251,7 +263,7 @@ def verify_and_refresh_cookie(
                 if final_url is not None:
                     detail += f" final_url={final_url}"
                 sentry_sdk.capture_message(
-                    f"cookie 検証中に {type(exc).__name__} が発生したため判定不能としました"
+                    f"cookie 検証中に {type(navigation_error).__name__} が発生したため判定不能としました"
                     f" ({detail})",
                     level="warning",
                 )

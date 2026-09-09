@@ -269,7 +269,9 @@ def verify_and_refresh_cookie(
                 )
                 return VerificationResult.INDETERMINATE, None
 
-            if page.url.startswith("https://x.com/home"):
+            state_check_start = time.monotonic()
+
+            def _current_valid_result():
                 current_cookies = context.cookies("https://x.com")
                 current_dict = {c["name"]: c["value"] for c in current_cookies}
                 return VerificationResult.VALID, {
@@ -277,11 +279,30 @@ def verify_and_refresh_cookie(
                     "auth_token": current_dict.get("auth_token", cookies["auth_token"]),
                 }
 
-            if _is_login_route(page.url) or _has_login_form(page):
+            if page.url.startswith("https://x.com/home"):
+                return _current_valid_result()
+
+            if _is_login_route(page.url):
                 return VerificationResult.INVALID, None
 
+            # _has_login_form は最大 2 秒待機する。その間に SPA が /home への
+            # 遷移を完了することがあるため、待機後に page.url を再確認する。
+            login_form_found = _has_login_form(page)
+            if page.url.startswith("https://x.com/home"):
+                return _current_valid_result()
+            if login_form_found or _is_login_route(page.url):
+                return VerificationResult.INVALID, None
+
+            elapsed_ms = round((time.monotonic() - state_check_start) * 1000)
+            try:
+                final_url = _sanitize_url(page.url)
+            except Exception:
+                final_url = None
+            detail = f"phase=state_check elapsed_ms={elapsed_ms}"
+            if final_url is not None:
+                detail += f" final_url={final_url}"
             sentry_sdk.capture_message(
-                "cookie 検証で想定外のページ状態のため判定不能としました",
+                f"cookie 検証で想定外のページ状態のため判定不能としました ({detail})",
                 level="warning",
             )
             return VerificationResult.INDETERMINATE, None

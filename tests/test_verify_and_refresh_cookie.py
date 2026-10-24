@@ -169,20 +169,21 @@ class TestVerifyAndRefreshCookieNavigationTimeout(unittest.TestCase):
         mock_sync_playwright.return_value = playwright_cm
         mock_launch_context.return_value = (browser, context)
 
-        with patch("src.login.sentry_sdk.capture_message") as mock_capture:
+        with patch("src.login.sentry_sdk") as mock_sdk:
+            scope = mock_sdk.new_scope.return_value.__enter__.return_value
             result, refreshed = verify_and_refresh_cookie(self.cookies, proxy=None)
 
         self.assertEqual(result, VerificationResult.INDETERMINATE)
         self.assertIsNone(refreshed)
 
-        mock_capture.assert_called_once()
-        message = mock_capture.call_args.args[0]
-        self.assertIn("phase=state_check", message)
-        self.assertIn("elapsed_ms=", message)
-        self.assertIn("final_url=https://x.com/some/unexpected/route", message)
-        self.assertNotIn("secret_token", message)
-        self.assertNotIn("super-secret", message)
-        self.assertNotIn("fragment-secret", message)
+        mock_sdk.capture_message.assert_called_once_with(
+            "cookie verification indeterminate (state_check)", level="warning"
+        )
+        context = scope.set_context.call_args.args[1]
+        self.assertIn("elapsed_ms", context)
+        self.assertEqual(context["final_url"], "https://x.com/some/unexpected/route")
+        self.assertNotIn("super-secret", str(context))
+        self.assertNotIn("fragment-secret", str(context))
 
 
 if __name__ == "__main__":

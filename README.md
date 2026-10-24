@@ -50,6 +50,8 @@ docker run --rm \
 | `TZ` | **強く推奨** | ブラウザに報告させるタイムゾーン。実行ホストの実際の所在地 (= 送信元 IP のジオロケーション) に合わせること (詳細は下記「既知の制約」参照) |
 | `SENTRY_DSN` | 省略可 | 設定するとエラー・ログイン失敗を GlitchTip (Sentry 互換) に送信する |
 | `SENTRY_ENVIRONMENT` | 省略可 | Sentry イベントの environment 値 (未設定時は `production`) |
+| `VERIFY_CACHE_TTL_SECONDS` | 省略可 | daemon モードで cookie 検証 (VALID) の結果をメモリ上にキャッシュする秒数 (既定 `600`、`0` で無効) |
+| `CHROMIUM_LAUNCH_TIMEOUT_MS` | 省略可 | Chromium 起動の timeout (ミリ秒、既定 `60000`。失敗時は 1 回再試行) |
 
 既に有効な `/data/cookies.json` があれば、ブラウザによる再ログインは行わずそのまま
 再利用する。

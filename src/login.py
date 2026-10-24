@@ -5,7 +5,10 @@
 - 通常の Playwright は Chrome DevTools Protocol (CDP) 経由の自動操作が検知されブロックされるため、CDP 検知回避パッチが当たった Playwright 互換フォークである patchright を採用する。
 """
 import json
+import math
 import os
+import re
+import threading
 import time
 from datetime import datetime, timezone
 from enum import Enum
@@ -14,7 +17,11 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import pyotp
 import sentry_sdk
-from patchright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+from patchright.sync_api import (
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+    sync_playwright,
+)
 
 
 class LoginError(RuntimeError):
@@ -51,6 +58,15 @@ class VerificationResult(Enum):
     VALID = "valid"
     INVALID = "invalid"
     INDETERMINATE = "indeterminate"
+
+
+def _env_number(name: str, default: float) -> float:
+    """環境変数を数値として読む。未設定・不正値・負数・inf/nan は default を返す。"""
+    try:
+        value = float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
 
 
 def _build_proxy_config() -> dict | None:
@@ -121,11 +137,20 @@ def _launch_context(playwright, proxy: dict | None):
         "--use-gl=swiftshader",
         "--enable-unsafe-swiftshader",
     ]
-    browser = playwright.chromium.launch(
-        headless=False,
-        proxy=proxy,
-        args=gl_args + ["--disable-dev-shm-usage"],
-    )
+    # 起動が固まった場合に request 全体が長時間ブロックされないよう、短い timeout で 1 回だけ再試行する。
+    launch_timeout_ms = _env_number("CHROMIUM_LAUNCH_TIMEOUT_MS", 60000)
+    for attempt in range(2):
+        try:
+            browser = playwright.chromium.launch(
+                headless=False,
+                proxy=proxy,
+                args=gl_args + ["--disable-dev-shm-usage"],
+                timeout=launch_timeout_ms,
+            )
+            break
+        except PlaywrightError:
+            if attempt == 1:
+                raise
     context = browser.new_context(locale="en-US")
     return browser, context
 
@@ -163,18 +188,57 @@ def _sanitize_url(url: str) -> str:
 def _goto_with_retry(
     page, url: str, timeout_ms: int, max_attempts: int = 2
 ) -> None:
-    """`page.goto` を実行し、timeout に限り max_attempts 回まで試行する。
+    """`page.goto` を実行し、timeout を含む Playwright エラー (`net::ERR_*` 等) に限り max_attempts 回まで試行する。
 
-    timeout 以外の例外は即座に呼び出し元へ伝播する (再試行しない)。
-    最終試行が timeout だった場合は、その例外をそのまま送出する。
+    Playwright 以外の例外は即座に呼び出し元へ伝播する (再試行しない)。
+    最終試行が失敗した場合は、その例外をそのまま送出する。
+    timeout 以外の Playwright エラー (即時失敗) は 1 秒待ってから再試行する。
     """
     for attempt in range(max_attempts):
         try:
             page.goto(url, wait_until="load", timeout=timeout_ms)
             return
-        except PlaywrightTimeoutError:
+        except PlaywrightError as exc:
             if attempt == max_attempts - 1:
                 raise
+            if not isinstance(exc, PlaywrightTimeoutError):
+                time.sleep(1)
+
+
+_NET_ERR_PATTERN = re.compile(r"net::ERR_[A-Z_]+")
+
+
+def _report_indeterminate(
+    phase: str,
+    elapsed_ms: int,
+    final_url: str | None,
+    exc: Exception | None = None,
+    include_error: bool = True,
+) -> None:
+    """判定不能を GlitchTip へ通知する。
+
+    メッセージは定数にして fingerprint (phase + エラー種別) でグルーピングする。
+    cookie 値が混入しうる場合は include_error=False で例外メッセージを送らない。
+    """
+    error_class = type(exc).__name__ if exc is not None else None
+    error = str(exc) if exc is not None else ""
+    match = _NET_ERR_PATTERN.search(error) if include_error else None
+    err_token = (match.group(0) if match else (error_class or "none"))[:40]
+    with sentry_sdk.new_scope() as scope:
+        scope.fingerprint = ["cookie-verify-indeterminate", phase, err_token]
+        scope.set_tag("verify.phase", phase)
+        scope.set_context(
+            "verify",
+            {
+                "elapsed_ms": elapsed_ms,
+                "final_url": final_url,
+                "error_class": error_class,
+                "error": error[:500] if include_error and exc is not None else None,
+            },
+        )
+        sentry_sdk.capture_message(
+            f"cookie verification indeterminate ({phase})", level="warning"
+        )
 
 
 def _has_login_form(page) -> bool:
@@ -229,12 +293,9 @@ def verify_and_refresh_cookie(
                 page = context.new_page()
             except Exception as exc:
                 elapsed_ms = round((time.monotonic() - injection_start) * 1000)
-                # 例外の詳細 (frame local 経由) を送ると cookie 値の生の値が
-                # 漏洩しうるため、種別のみを通知する。
-                sentry_sdk.capture_message(
-                    f"cookie 検証中に {type(exc).__name__} が発生したため判定不能としました"
-                    f" (phase=cookie_injection elapsed_ms={elapsed_ms})",
-                    level="warning",
+                # 例外メッセージに cookie 値が含まれうるため、種別のみを通知する。
+                _report_indeterminate(
+                    "cookie_injection", elapsed_ms, None, exc, include_error=False
                 )
                 return VerificationResult.INDETERMINATE, None
 
@@ -259,13 +320,8 @@ def verify_and_refresh_cookie(
                     final_url = _sanitize_url(page.url)
                 except Exception:
                     final_url = None
-                detail = f"phase=navigation elapsed_ms={elapsed_ms}"
-                if final_url is not None:
-                    detail += f" final_url={final_url}"
-                sentry_sdk.capture_message(
-                    f"cookie 検証中に {type(navigation_error).__name__} が発生したため判定不能としました"
-                    f" ({detail})",
-                    level="warning",
+                _report_indeterminate(
+                    "navigation", elapsed_ms, final_url, navigation_error
                 )
                 return VerificationResult.INDETERMINATE, None
 
@@ -298,13 +354,7 @@ def verify_and_refresh_cookie(
                 final_url = _sanitize_url(page.url)
             except Exception:
                 final_url = None
-            detail = f"phase=state_check elapsed_ms={elapsed_ms}"
-            if final_url is not None:
-                detail += f" final_url={final_url}"
-            sentry_sdk.capture_message(
-                f"cookie 検証で想定外のページ状態のため判定不能としました ({detail})",
-                level="warning",
-            )
+            _report_indeterminate("state_check", elapsed_ms, final_url)
             return VerificationResult.INDETERMINATE, None
         finally:
             browser.close()
@@ -545,6 +595,42 @@ def _write_cache(
     os.replace(tmp_path, cache_path)
 
 
+# username -> (検証済み cookie, 有効期限 (time.monotonic))。VALID 判定の結果のみを保持し、
+# crawler からの高頻度な /login で毎回 Chromium を起動しないようにする。
+# ponytail: プロセス内のみ・件数上限なし (username は少数)。複数プロセス構成にする場合は共有ストアが必要。
+_verify_cache: dict[str, tuple[dict, float]] = {}
+_verify_cache_lock = threading.Lock()
+
+
+def _verify_cache_get(username: str, cookies: dict) -> dict | None:
+    """TTL 内で cookie が一致する検証済みエントリを返す。不一致・期限切れは破棄する。"""
+    with _verify_cache_lock:
+        entry = _verify_cache.get(username)
+        if entry is None:
+            return None
+        verified, expires_at = entry
+        if time.monotonic() >= expires_at or verified != cookies:
+            del _verify_cache[username]
+            return None
+        return dict(verified)
+
+
+def _verify_cache_set(username: str, cookies: dict) -> None:
+    """VALID 判定の cookie を TTL 付きで保存する。TTL が 0 の場合は保存せず既存エントリも破棄する。"""
+    ttl = _env_number("VERIFY_CACHE_TTL_SECONDS", 600)
+    with _verify_cache_lock:
+        if ttl > 0:
+            _verify_cache[username] = (dict(cookies), time.monotonic() + ttl)
+        else:
+            _verify_cache.pop(username, None)
+
+
+def _verify_cache_invalidate(username: str) -> None:
+    """username の検証キャッシュを破棄する。"""
+    with _verify_cache_lock:
+        _verify_cache.pop(username, None)
+
+
 def get_cookies(
     username: str,
     password: str,
@@ -571,6 +657,11 @@ def get_cookies(
     proxy = _build_proxy_config()
     cached = load_cached_cookies(cache_path)
     if cached:
+        hit = _verify_cache_get(username, cached)
+        if hit is not None:
+            if timing is not None:
+                timing["verify_ms"] = 0.0
+            return hit
         verify_start = time.monotonic()
         try:
             result, latest = verify_and_refresh_cookie(cached, proxy)
@@ -586,13 +677,16 @@ def get_cookies(
             },
         )
         if result is VerificationResult.VALID:
+            _verify_cache_set(username, latest)
             return latest
+        _verify_cache_invalidate(username)
         if result is VerificationResult.INDETERMINATE:
             raise IndeterminateVerificationError(
                 "cookie の有効性を確定できませんでした"
                 " (timeout / network error 等)。ct0 / auth_token は変更していません。"
             )
 
+    _verify_cache_invalidate(username)
     login_start = time.monotonic()
     try:
         result_cookies = login(

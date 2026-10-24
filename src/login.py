@@ -5,6 +5,7 @@
 - 通常の Playwright は Chrome DevTools Protocol (CDP) 経由の自動操作が検知されブロックされるため、CDP 検知回避パッチが当たった Playwright 互換フォークである patchright を採用する。
 """
 import json
+import math
 import os
 import re
 import threading
@@ -60,12 +61,12 @@ class VerificationResult(Enum):
 
 
 def _env_number(name: str, default: float) -> float:
-    """環境変数を数値として読む。未設定・不正値・負数は default を返す。"""
+    """環境変数を数値として読む。未設定・不正値・負数・inf/nan は default を返す。"""
     try:
         value = float(os.environ[name])
     except (KeyError, ValueError):
         return default
-    return value if value >= 0 else default
+    return value if math.isfinite(value) and value >= 0 else default
 
 
 def _build_proxy_config() -> dict | None:
@@ -136,7 +137,7 @@ def _launch_context(playwright, proxy: dict | None):
         "--use-gl=swiftshader",
         "--enable-unsafe-swiftshader",
     ]
-    # 起動が固まった場合に 180 秒 (既定) × 再試行で 1 request が 6 分近くかかるため、短い timeout で 1 回だけ再試行する。
+    # 起動が固まった場合に request 全体が長時間ブロックされないよう、短い timeout で 1 回だけ再試行する。
     launch_timeout_ms = _env_number("CHROMIUM_LAUNCH_TIMEOUT_MS", 60000)
     for attempt in range(2):
         try:
@@ -187,9 +188,9 @@ def _sanitize_url(url: str) -> str:
 def _goto_with_retry(
     page, url: str, timeout_ms: int, max_attempts: int = 2
 ) -> None:
-    """`page.goto` を実行し、timeout と `net::ERR_*` 等の Playwright エラーに限り max_attempts 回まで試行する。
+    """`page.goto` を実行し、timeout を含む Playwright エラー (`net::ERR_*` 等) に限り max_attempts 回まで試行する。
 
-    それ以外の例外は即座に呼び出し元へ伝播する (再試行しない)。
+    Playwright 以外の例外は即座に呼び出し元へ伝播する (再試行しない)。
     最終試行が失敗した場合は、その例外をそのまま送出する。
     timeout 以外の Playwright エラー (即時失敗) は 1 秒待ってから再試行する。
     """
@@ -615,6 +616,7 @@ def _verify_cache_get(username: str, cookies: dict) -> dict | None:
 
 
 def _verify_cache_set(username: str, cookies: dict) -> None:
+    """VALID 判定の cookie を TTL 付きで保存する。TTL が 0 の場合は保存せず既存エントリも破棄する。"""
     ttl = _env_number("VERIFY_CACHE_TTL_SECONDS", 600)
     with _verify_cache_lock:
         if ttl > 0:
@@ -624,6 +626,7 @@ def _verify_cache_set(username: str, cookies: dict) -> None:
 
 
 def _verify_cache_invalidate(username: str) -> None:
+    """username の検証キャッシュを破棄する。"""
     with _verify_cache_lock:
         _verify_cache.pop(username, None)
 

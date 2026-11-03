@@ -73,7 +73,7 @@ HTTP サーバーとして常駐し、リクエストごとに異なるアカウ
 
 ```bash
 docker run --rm -d \
-  -e MODE=daemon -p 8080:8080 \
+  -e MODE=daemon -p 127.0.0.1:8080:8080 \
   -v "$(pwd)/data:/data" \
   twitter-cookie-issuer
 
@@ -163,12 +163,14 @@ once モードと同じ `SENTRY_DSN`/`SENTRY_ENVIRONMENT` が daemon モード�
 
 ```
 src/
-  __init__.py   # パッケージマーカー (中身なし)
-  __main__.py   # CLIエントリーポイント (once/daemon モード分岐、`python -m src` で起動)
-  config.py     # onceモード用の環境変数読み込み
-  login.py      # patchright によるログイン・cookie再利用判定
+  __init__.py         # パッケージマーカー (中身なし)
+  __main__.py         # CLI エントリーポイント (once/daemon モード分岐、`python -m src` で起動)
+  config.py           # once モード用の環境変数読み込み
+  login.py            # patchright によるログイン・cookie 再利用判定
+  error_reporting.py  # Sentry (GlitchTip 互換) 初期化と機密値のスクラビング
+tests/                # unittest によるテスト
 Dockerfile
-entrypoint.sh   # xvfb-run 経由で python -m src を起動するラッパー
+entrypoint.sh         # xvfb-run 経由で python -m src を起動するラッパー
 .dockerignore
 requirements.txt
 ```
@@ -176,6 +178,15 @@ requirements.txt
 調査過程で作成した不採用実装・検証スクリプト群 (`trash/`) と、ボット判定回避手法の
 詳細な調査ログ (`KNOWLEDGE.md`) は `.gitignore` で除外されている。運用者のローカル
 環境には残るが、手法の詳細を公開リポジトリに含めないよう git 管理には含めていない。
+
+## テスト
+
+依存パッケージをインストールした環境で、リポジトリのルートから実行する。
+
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests -t .
+```
 
 ## ライセンス・免責事項
 

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# once モードの出力先。daemon モードは main.py 側でユーザー名ごとのパスを組み立てる。
+# once モードの出力先。daemon モードは __main__.py 側でユーザー名ごとのパスを組み立てる。
 COOKIES_PATH = Path("/data/cookies.json")
 SCREENSHOTS_DIR = Path("/data/screenshots")
 

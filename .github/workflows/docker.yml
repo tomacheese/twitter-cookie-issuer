@@ -1,4 +1,4 @@
-# 任意のレジストリに Docker image を公開orビルドする。
+# 任意のレジストリに Docker image を公開または build する。
 # プルリクの作成・更新時に動作する。
 
 name: Docker
@@ -24,14 +24,14 @@ on:
       - closed
 
 concurrency:
-  # Include event_name so pull_request and pull_request_target runs do not cancel each other
+  # pull_request と pull_request_target の実行が互いにキャンセルされないよう event_name を含める
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.merged == true && 'master' || github.event.pull_request.head.sha }}
 
 jobs:
   post-approval-request:
     name: Post approval request
     runs-on: ubuntu-latest
-    # Post the approval request only for fork PRs (not needed on closed)
+    # fork PR に対してのみ承認依頼を投稿する (closed 時は不要)
     if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository && github.event.action != 'closed'
     continue-on-error: true
     permissions:
@@ -63,9 +63,9 @@ jobs:
     name: Approval gate
     runs-on: ubuntu-latest
     needs: post-approval-request
-    # Always run, regardless of the post-approval-request result
+    # post-approval-request の結果に関わらず常に実行する
     if: always()
-    # Require manual approval via Environment only for fork PRs that are not closed
+    # closed でない fork PR に限り、Environment による手動承認を必須とする
     environment: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name != github.repository && github.event.action != 'closed' && 'fork-pr-build' || '' }}
     permissions: {}
     steps:

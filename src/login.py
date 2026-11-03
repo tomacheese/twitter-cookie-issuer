@@ -125,6 +125,24 @@ def _save_failure_screenshot(
     return path
 
 
+def _host_diagnostics(started: float) -> dict:
+    """起動失敗時にホスト逼迫を切り分けるための診断値 (取得失敗は None)。"""
+    diag: dict = {"elapsed_s": round(time.monotonic() - started, 1)}
+    try:
+        diag["loadavg"] = os.getloadavg()
+    except OSError:
+        diag["loadavg"] = None
+    try:
+        with open("/proc/meminfo") as f:
+            kb = next(
+                int(line.split()[1]) for line in f if line.startswith("MemAvailable:")
+            )
+        diag["mem_available_mb"] = kb // 1024
+    except (OSError, StopIteration, ValueError, IndexError):
+        diag["mem_available_mb"] = None
+    return diag
+
+
 def _launch_context(playwright, proxy: dict | None):
     """patchright でブラウザ・コンテキストを起動する共通処理。
 
@@ -134,11 +152,14 @@ def _launch_context(playwright, proxy: dict | None):
     `--disable-dev-shm-usage` は Docker のデフォルト `/dev/shm` サイズ (64MB) が小さく、レンダラープロセスがクラッシュしうる既知の問題への対策 (Playwright/Puppeteer の Docker 運用で広く推奨されているフラグ)。
     """
     gl_args = [
-        "--use-gl=swiftshader",
+        # 新しい Chromium は旧形式の `--use-gl=swiftshader` を拒否し GPU プロセスがクラッシュループするため ANGLE 経由で指定する。
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
         "--enable-unsafe-swiftshader",
     ]
     # 起動が固まった場合に request 全体が長時間ブロックされないよう、短い timeout で 1 回だけ再試行する。
     launch_timeout_ms = _env_number("CHROMIUM_LAUNCH_TIMEOUT_MS", 60000)
+    started = time.monotonic()
     for attempt in range(2):
         try:
             browser = playwright.chromium.launch(
@@ -150,6 +171,9 @@ def _launch_context(playwright, proxy: dict | None):
             break
         except PlaywrightError:
             if attempt == 1:
+                sentry_sdk.get_current_scope().set_context(
+                    "chromium_launch", _host_diagnostics(started)
+                )
                 raise
     context = browser.new_context(locale="en-US")
     return browser, context

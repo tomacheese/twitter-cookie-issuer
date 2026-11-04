@@ -1,7 +1,7 @@
 """patchright を用いた x.com へのログインと ct0/auth_token 取得処理。
 
 選定理由:
-- 独自実装 (curl_cffi + x_client_transaction + ui_metrics 手動解読) は LoginEnterUserIdentifierSSO ステップで一貫して code 399 "Could not log you in now" を返すことを確認済み (詳細は KNOWLEDGE.md 参照)。
+- 独自実装 (curl_cffi + x_client_transaction + ui_metrics 手動解読) は LoginEnterUserIdentifierSSO ステップで一貫して code 399 "Could not log you in now" を返すことを確認済み。
 - 通常の Playwright は Chrome DevTools Protocol (CDP) 経由の自動操作が検知されブロックされるため、CDP 検知回避パッチが当たった Playwright 互換フォークである patchright を採用する。
 """
 import json
@@ -146,13 +146,13 @@ def _host_diagnostics(started: float) -> dict:
 def _launch_context(playwright, proxy: dict | None):
     """patchright でブラウザ・コンテキストを起動する共通処理。
 
-    patchright 自体に CDP 検知回避のパッチが含まれているため playwright-stealth を重ねる必要はないことを確認済み。Xvfb 上での非ヘッドレス起動が必須 (headless だと検知されブロックされる)。
+    patchright 自体に CDP 検知回避のパッチが含まれているため、playwright-stealth は重ねない。Xvfb 上での非ヘッドレス起動が必須 (headless だと検知されブロックされる)。
 
-    Docker コンテナには既定では `/dev/dri` (GPU デバイス) が存在せず、`--use-gl`/`--enable-unsafe-swiftshader` を指定しないと WebGL のコンテキスト生成自体が失敗する (`getContext('webgl')` が null を返す) ことを確認済みのため、常に SwiftShader (ソフトウェアレンダラー) で起動する。GPU passthrough (`/dev/dri` を実 GPU 経由で渡す構成) も検証したが、レンダラー文字列の違い (SwiftShader か実 GPU か) はログイン成功・失敗と無相関であることが実機検証で判明したため (詳細は KNOWLEDGE.md §6.6/§6.8 参照)、ホスト依存の起動オプションを要求する GPU passthrough は採用しない。
+    Docker コンテナには `/dev/dri` が無く、SwiftShader を明示しないと WebGL コンテキストを生成できないため、常に SwiftShader で起動する。レンダラー文字列はログイン成否と無相関なので、ホスト依存の GPU passthrough は採用しない。
     `--disable-dev-shm-usage` は Docker のデフォルト `/dev/shm` サイズ (64MB) が小さく、レンダラープロセスがクラッシュしうる既知の問題への対策 (Playwright/Puppeteer の Docker 運用で広く推奨されているフラグ)。
     """
     gl_args = [
-        # 新しい Chromium は旧形式の `--use-gl=swiftshader` を拒否し GPU プロセスがクラッシュループするため ANGLE 経由で指定する。
+        # SwiftShader は ANGLE 経由で指定する。
         "--use-gl=angle",
         "--use-angle=swiftshader",
         "--enable-unsafe-swiftshader",
@@ -413,7 +413,7 @@ def login(
             username_field.press("Enter")
 
             # ユーザー名送信直後、Castle.io 等の不正検知により "We've temporarily limited your login. Please try again later." のようなレート制限バナーが同一画面上に表示されることがある。
-            # このとき begin_login API 自体は HTTP 200 で応答するため (実通信キャプチャで確認済み、詳細は KNOWLEDGE.md 参照)、検知しないまま後続のパスワード欄クリックに進むと、バナー表示によるレイアウト変化でクリックがインターセプトされ続け、原因不明のクリックタイムアウトとしてしか報告できていなかった。
+            # このとき begin_login API 自体は HTTP 200 で応答するため (実通信キャプチャで確認済み)、検知しないまま後続のパスワード欄クリックに進むと、バナー表示によるレイアウト変化でクリックがインターセプトされ続け、原因不明のクリックタイムアウトとしてしか報告できていなかった。
             # 成功時 (バナー非表示時) の待ち時間を抑えるため、短い timeout で早期に検知し、実際の原因をエラーメッセージとして明示する。
             early_error_message = _extract_generic_error(page, timeout=1000)
             if early_error_message:

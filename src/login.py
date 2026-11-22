@@ -611,11 +611,13 @@ def _write_cache(
             existing_metadata = {}
         existing_metadata.update(metadata)
         existing["metadata"] = existing_metadata
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp_path = cache_path.with_name(cache_path.name + ".tmp")
-    tmp_path.write_text(
-        json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        # 残存した .tmp は O_CREAT の mode が効かないため、rename 後に緩い mode を引き継がないよう揃える。
+        os.fchmod(fd, 0o600)
+        f.write(json.dumps(existing, indent=2, ensure_ascii=False))
     os.replace(tmp_path, cache_path)
 
 

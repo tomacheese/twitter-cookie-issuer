@@ -283,7 +283,9 @@ class LoginRequestHandler(BaseHTTPRequestHandler):
 def run_daemon() -> None:
     """daemon モード: HTTPサーバーとして常駐し、リクエストごとにログインする。"""
     port = int(os.environ.get("PORT", "8080"))
-    COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+    COOKIES_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # イメージ build 時や volume で既存のディレクトリには mkdir の mode が効かないため明示的に絞る。
+    COOKIES_DIR.chmod(0o700)
     server = ThreadingHTTPServer(("0.0.0.0", port), LoginRequestHandler)
     print(f"daemon モードで起動しました (port: {port})")
     server.serve_forever()

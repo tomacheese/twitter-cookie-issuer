@@ -8,6 +8,8 @@ import os
 import unittest
 from unittest import mock
 
+import sentry_sdk
+
 from src.error_reporting import init_sentry, _scrub_before_send, _scrub_repr_string, _scrub_value
 
 DUMMY_CT0 = "dummy-ct0-value"
@@ -174,11 +176,35 @@ class TestScrubBeforeSendResponseBody(unittest.TestCase):
 
 
 class TestInitSentryDisablesLocalVariables(unittest.TestCase):
-    def test_include_local_variables_is_false(self):
+    def test_init_does_not_raise_and_events_have_no_frame_vars(self):
+        captured = []
+
+        def capture(event, hint):
+            captured.append(event)
+            return None
+
+        self.addCleanup(sentry_sdk.init)
         with mock.patch.dict(os.environ, {"SENTRY_DSN": "https://k@example.invalid/1"}):
-            with mock.patch("sentry_sdk.init") as init:
+            with mock.patch("src.error_reporting._scrub_before_send", capture):
                 init_sentry()
-        self.assertIs(init.call_args.kwargs["include_local_variables"], False)
+
+        secret = "".join(["dummy", "-pw-", "for-test"])
+
+        def login_with_password():
+            password = secret  # noqa: F841
+            raise ValueError("boom")
+
+        try:
+            login_with_password()
+        except ValueError:
+            sentry_sdk.capture_exception()
+
+        self.assertEqual(len(captured), 1)
+        frames = captured[0]["exception"]["values"][0]["stacktrace"]["frames"]
+        self.assertTrue(frames)
+        for frame in frames:
+            self.assertNotIn("vars", frame)
+        self.assertNotIn(secret, json.dumps(captured[0]))
 
 
 if __name__ == "__main__":
